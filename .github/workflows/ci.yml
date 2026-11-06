@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal app
+        run: ./bundle.sh --universal
+      - name: Self-test (arm64)
+        run: '"build/Claude Helper.app/Contents/MacOS/ClaudeHelper" --cli selftest'
+      - name: Self-test (x86_64 under Rosetta)
+        run: |
+          if /usr/bin/pgrep -q oahd || sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license >/dev/null 2>&1; then
+            arch -x86_64 "build/Claude Helper.app/Contents/MacOS/ClaudeHelper" --cli selftest
+          else
+            echo "Rosetta not available, skipping"
+          fi

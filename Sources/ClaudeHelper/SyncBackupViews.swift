@@ -1,0 +1,308 @@
+import AppKit
+import HelperCore
+import SwiftUI
+
+struct SyncView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        Form {
+            Section {
+                Text("Pick the account folders that should hold the same chats. For every chat, the copy with the newest file wins and is written to all picked folders. Chats deleted in one folder are moved out of the others into the backup, never brought back. Each folder's archived list is rebuilt to match. You see every change before anything is written.")
+                    .foregroundStyle(.secondary)
+            }
+            Section("Account folders") {
+                ForEach(model.snapshot?.folders ?? []) { f in
+                    HStack(alignment: .firstTextBaseline) {
+                        Toggle(isOn: Binding(
+                            get: { model.syncSelection.contains(f.folder.id) },
+                            set: { on in
+                                if on { model.syncSelection.insert(f.folder.id) } else { model.syncSelection.remove(f.folder.id) }
+                            })) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(model.label(f.folder))
+                                Text(f.folder.id).font(.caption).foregroundStyle(.tertiary).textSelection(.enabled)
+                                let s = f.sessions
+                                Text("\(s.count) chats, \(s.filter(\.isArchived).count) archived, \(s.filter(\.isStarred).count) pinned, \(f.deletedMarkers.count) deleted markers")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                if let p = f.archivedIndex.problem {
+                                    Text("archived-sessions.idx: " + p).font(.caption).foregroundStyle(.red)
+                                }
+                                if f.folder.isBackupCopy {
+                                    Text("Hand-made backup copy, usually leave it out.").font(.caption).foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                        .toggleStyle(.checkbox)
+                        Spacer()
+                        TextField("", text: Binding(
+                            get: { model.nicknames[f.folder.id] ?? "" },
+                            set: { model.nicknames[f.folder.id] = $0.isEmpty ? nil : $0 }), prompt: Text("Nickname"))
+                            .labelsHidden()
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 160)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            Section {
+                HStack {
+                    Text("\(model.syncSelection.count) folders picked").foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Preview Sync...") { model.previewSync() }
+                        .disabled(model.syncSelection.count < 2)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct BackupsView: View {
+    @Environment(AppModel.self) private var model
+    @State private var backups: [BackupInfo] = []
+    @State private var selected: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Every write makes a backup here first. Restoring one quits Claude, backs up the current state, puts the session files back as they were and reopens Claude. backlog, waiting-input and scheduled-tasks.json are never touched.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Button("Back Up Now") {
+                    model.banner = model.backupNow()
+                    backups = model.backups()
+                }
+                .help("Save a copy of every account folder's session files without changing anything")
+                Button("Open Folder") { model.reveal(model.paths.backupsDir) }
+            }
+            .padding(12)
+            Divider()
+            if backups.isEmpty {
+                Text("No backups yet.").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(backups, selection: $selected) { b in
+                    BackupRow(backup: b, expanded: selected == b.id).tag(b.id)
+                }
+            }
+        }
+        .onAppear { backups = model.backups() }
+        .onChange(of: model.planSheet == nil) { _, _ in backups = model.backups() }
+    }
+}
+
+struct BackupRow: View {
+    @Environment(AppModel.self) private var model
+    let backup: BackupInfo
+    let expanded: Bool
+
+    var foldersText: String {
+        backup.folders.map { String($0.accountId.prefix(8)) + "/" + String($0.orgId.prefix(8)) }.joined(separator: ", ")
+    }
+
+    var countsText: String {
+        let applied = backup.applied ? "" : ", not applied"
+        return "\(backup.files.count) files saved, \(backup.changes.count) planned changes, \(backup.removed.count) moved out" + applied
+    }
+
+    var body: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(backup.title).font(.headline)
+                Text(backup.created.formatted(date: .abbreviated, time: .standard) + ", " + foldersText)
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(countsText).font(.caption).foregroundStyle(.secondary)
+                if expanded {
+                    ForEach(Array(backup.changes.prefix(12)), id: \.self) { c in Text("- " + c).font(.caption) }
+                    if backup.changes.count > 12 {
+                        Text("and \(backup.changes.count - 12) more").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Spacer()
+            Button("Show") { model.reveal(backup.dir) }
+            Button("Preview Restore...") { model.previewRestore(backup) }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct PlanSheetView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        if let sheet = model.planSheet {
+            content(sheet).frame(minWidth: 760, idealWidth: 860, minHeight: 520, idealHeight: 640)
+        }
+    }
+
+    @ViewBuilder
+    func content(_ sheet: PlanSheet) -> some View {
+        let plan = sheet.plan
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(plan.title).font(.title2.bold())
+                Text(summaryLine(plan)).foregroundStyle(.secondary)
+                if let note = sheet.note { Text(note).foregroundStyle(.orange) }
+            }
+            .padding(16)
+            Divider()
+            switch sheet.state {
+            case .preview:
+                changeList(plan)
+            case .applying(let steps):
+                stepList(steps, running: true)
+            case .done(let result, let reopened, _):
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Done. Wrote \(result.written) file(s), moved \(result.moved) to the backup.", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green).font(.headline)
+                    Text(reopened ? "Claude was reopened." : (model.claudeRunning ? "" : "Claude was not running, so it was not started."))
+                    HStack {
+                        Text("Backup: " + result.backup.dir.path).font(.caption).textSelection(.enabled)
+                        Button("Show") { model.reveal(result.backup.dir) }
+                    }
+                    if result.log.contains(where: { $0.hasPrefix("WARNING") }) {
+                        ForEach(result.log.filter { $0.hasPrefix("WARNING") }, id: \.self) { Text($0).foregroundStyle(.orange) }
+                    }
+                    Spacer()
+                }
+                .padding(16)
+            case .failed(let message, let steps):
+                VStack(alignment: .leading, spacing: 10) {
+                    Label(message, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                    stepList(steps, running: false)
+                }
+                .padding(16)
+            }
+            Divider()
+            footer(sheet)
+                .padding(12)
+        }
+    }
+
+    func summaryLine(_ plan: WritePlan) -> String {
+        var parts = ["\(plan.changes.count) change(s) in \(Set(plan.changes.map(\.folder.id)).count) folder(s)"]
+        if !plan.problems.isEmpty { parts.append("\(plan.problems.count) problem(s) block applying") }
+        if !plan.warnings.isEmpty { parts.append("\(plan.warnings.count) warning(s)") }
+        return parts.joined(separator: ", ")
+    }
+
+    @ViewBuilder
+    func changeList(_ plan: WritePlan) -> some View {
+        List {
+            if !plan.problems.isEmpty {
+                Section("Schema guard: nothing will be written until these are fixed") {
+                    ForEach(plan.problems) { p in
+                        VStack(alignment: .leading) {
+                            Text(p.message).foregroundStyle(.red)
+                            Text(p.path.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+            if !plan.warnings.isEmpty {
+                Section("Warnings") {
+                    ForEach(plan.warnings, id: \.self) { Text($0).foregroundStyle(.orange) }
+                }
+            }
+            if plan.changes.isEmpty && plan.problems.isEmpty {
+                Text("Nothing to change. Everything already matches.").foregroundStyle(.secondary)
+            }
+            let byFolder = Dictionary(grouping: plan.changes, by: \.folder.id)
+            ForEach(byFolder.keys.sorted(), id: \.self) { fid in
+                let changes = byFolder[fid]!.sorted { a, b in
+                    let ka = kindOrder(a.kind), kb = kindOrder(b.kind)
+                    return ka != kb ? ka < kb : a.summary.localizedCaseInsensitiveCompare(b.summary) == .orderedAscending
+                }
+                Section(model.label(changes[0].folder) + ":  " + totals(changes)) {
+                    ForEach(changes) { c in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: icon(c.kind)).foregroundStyle(color(c.kind)).frame(width: 16)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(c.summary).lineLimit(2)
+                                if let d = c.detail { Text(d).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static let kindNames: [PlannedChange.Kind: String] = [
+        .edit: "edit", .update: "update", .add: "add", .putBack: "put back", .removeDeleted: "move out deleted",
+        .moveOut: "move out", .addMarker: "deleted marker", .archivedIndex: "archived list",
+    ]
+
+    func kindOrder(_ k: PlannedChange.Kind) -> Int {
+        [.edit, .update, .add, .putBack, .removeDeleted, .moveOut, .addMarker, .archivedIndex].firstIndex(of: k) ?? 99
+    }
+
+    func totals(_ changes: [PlannedChange]) -> String {
+        let counts = Dictionary(grouping: changes, by: \.kind).mapValues(\.count)
+        return counts.keys.sorted { kindOrder($0) < kindOrder($1) }
+            .map { "\(Self.kindNames[$0] ?? $0.rawValue): \(counts[$0]!)" }
+            .joined(separator: ", ")
+    }
+
+    func icon(_ k: PlannedChange.Kind) -> String {
+        switch k {
+        case .edit: return "pencil"
+        case .add: return "plus.circle"
+        case .update: return "arrow.triangle.2.circlepath"
+        case .removeDeleted, .moveOut: return "tray.and.arrow.up"
+        case .addMarker: return "trash.slash"
+        case .archivedIndex: return "archivebox"
+        case .putBack: return "arrow.uturn.backward"
+        }
+    }
+
+    func color(_ k: PlannedChange.Kind) -> Color {
+        switch k {
+        case .removeDeleted, .moveOut, .addMarker: return .orange
+        case .add, .putBack: return .green
+        default: return .accentColor
+        }
+    }
+
+    func stepList(_ steps: [String], running: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(steps.enumerated()), id: \.offset) { i, s in
+                HStack {
+                    if running && i == steps.count - 1 { ProgressView().controlSize(.small) } else { Image(systemName: "checkmark").foregroundStyle(.secondary) }
+                    Text(s).textSelection(.enabled)
+                }
+            }
+            if steps.isEmpty && running { ProgressView().controlSize(.small) }
+            Spacer()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    func footer(_ sheet: PlanSheet) -> some View {
+        HStack {
+            switch sheet.state {
+            case .preview:
+                if !model.claudeRunning, model.paths.isLiveSessionsRoot {
+                    Button("Reopen Claude") { model.reopenClaude() }
+                }
+                Spacer()
+                Button("Cancel") { model.planSheet = nil }.keyboardShortcut(.cancelAction)
+                Button(model.claudeRunning ? "Quit Claude, Back Up and Apply" : "Back Up and Apply") { model.applyPlan() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!sheet.plan.canApply)
+            case .applying:
+                Spacer()
+                Text("Working. Do not reopen Claude yet.").foregroundStyle(.secondary)
+            case .done, .failed:
+                Spacer()
+                Button("Close") { model.planSheet = nil; model.refresh() }.keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+}
