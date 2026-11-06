@@ -19,6 +19,13 @@ public struct HelperPaths: Sendable {
         self.dataDir = dataDir
     }
 
+    /// ~/Library/Application Support/Claude (holds config.json and the Cookies database)
+    public var claudeDir: URL { claudeConfig.deletingLastPathComponent() }
+    public var profilesDir: URL { dataDir.appendingPathComponent("profiles", isDirectory: true) }
+    public var isLiveClaudeDir: Bool {
+        claudeDir.standardizedFileURL.path == HelperPaths.home.appendingPathComponent("Library/Application Support/Claude").standardizedFileURL.path
+    }
+
     public var backupsDir: URL { dataDir.appendingPathComponent("backups", isDirectory: true) }
     public var indexDB: URL { dataDir.appendingPathComponent("index.sqlite") }
 
@@ -41,14 +48,21 @@ public struct HelperPaths: Sendable {
         }
         return HelperPaths(
             sessionsRoot: url("CLAUDE_HELPER_SESSIONS_ROOT", defaultSessionsRoot),
-            claudeConfig: home.appendingPathComponent("Library/Application Support/Claude/config.json"),
+            claudeConfig: url("CLAUDE_HELPER_CLAUDE_DIR", home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true))
+                .appendingPathComponent("config.json"),
             projectsRoot: url("CLAUDE_HELPER_PROJECTS_ROOT", home.appendingPathComponent(".claude/projects", isDirectory: true)),
             dataDir: url("CLAUDE_HELPER_DATA_DIR", home.appendingPathComponent("Library/Application Support/ClaudeHelper", isDirectory: true))
         )
     }
 
+    /// The helper's folder holds backups and saved logins, so only this user may read it.
     public func ensureDataDirs() throws {
-        try FileManager.default.createDirectory(at: backupsDir, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        try fm.createDirectory(at: backupsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: profilesDir, withIntermediateDirectories: true)
+        for dir in [dataDir, backupsDir, profilesDir] {
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        }
     }
 
     /// Account the Claude app was last signed in to. Reads only one key from config.json.

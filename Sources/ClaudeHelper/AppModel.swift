@@ -6,6 +6,7 @@ import SwiftUI
 enum AppSection: String, CaseIterable, Identifiable {
     case sessions = "Sessions"
     case search = "Search"
+    case accounts = "Accounts"
     case sync = "Account sync"
     case backups = "Backups"
     var id: String { rawValue }
@@ -13,6 +14,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         switch self {
         case .sessions: return "list.bullet.rectangle"
         case .search: return "magnifyingglass"
+        case .accounts: return "person.2"
         case .sync: return "arrow.triangle.2.circlepath"
         case .backups: return "archivebox"
         }
@@ -74,6 +76,14 @@ final class AppModel {
     private var cancelFlag: CancelFlag?
     private var timer: Timer?
 
+    // Login profiles
+    var profiles: [LoginProfile] = []
+    var switchSteps: [String] = []
+    var switching = false
+    var switchSyncEnabled: Bool {
+        didSet { UserDefaults.standard.set(switchSyncEnabled, forKey: "switch.sync") }
+    }
+
     // Sync
     var syncSelection: Set<String> {
         didSet { UserDefaults.standard.set(Array(syncSelection), forKey: "syncSelection") }
@@ -87,6 +97,7 @@ final class AppModel {
         indexSettings = IndexSettings(includeToolOutput: d.bool(forKey: "index.tools"), includeSubagents: d.bool(forKey: "index.subagents"))
         syncSelection = Set(d.stringArray(forKey: "syncSelection") ?? [])
         nicknames = d.dictionary(forKey: "folderNicknames") as? [String: String] ?? [:]
+        switchSyncEnabled = d.bool(forKey: "switch.sync")
         refresh()
         loadIndexStats()
         startIndexing()
@@ -104,6 +115,7 @@ final class AppModel {
 
     func refresh() {
         snapshot = SessionScanner.scan(paths: paths)
+        profiles = LoginProfiles.list(paths: paths)
         claudeRunning = ClaudeApp.isRunning()
         // Drop pending edits whose session vanished.
         if let snap = snapshot {
@@ -240,6 +252,111 @@ final class AppModel {
 
     func reopenClaude() {
         Task { try? await ClaudeApp.open(); self.refresh() }
+    }
+
+    // MARK: Login profiles
+
+    var activeProfile: LoginProfile? { profiles.first { $0.accountId != nil && $0.accountId == snapshot?.activeAccountId } }
+
+    func saveCurrentLogin(name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let p = try LoginProfiles.saveCurrent(name: trimmed.isEmpty ? "Account" : trimmed, paths: paths)
+            banner = "Saved the current Claude login as \(p.name)."
+        } catch {
+            banner = error.localizedDescription
+        }
+        refresh()
+    }
+
+    func renameProfile(_ p: LoginProfile, to name: String) {
+        try? LoginProfiles.renameProfile(p, to: name, paths: paths)
+        refresh()
+    }
+
+    func deleteProfile(_ p: LoginProfile) {
+        let alert = NSAlert()
+        alert.messageText = "Delete the saved login \(p.name)?"
+        alert.informativeText = "Only the helper's saved copy is removed. Claude and your chats are not touched."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        try? LoginProfiles.delete(p, paths: paths)
+        refresh()
+    }
+
+    /// Ask first: switching quits Claude, which stops running Code sessions.
+    func confirmAndSwitch(_ p: LoginProfile) {
+        guard !switching else { return }
+        let alert = NSAlert()
+        alert.messageText = "Switch Claude to \(p.name)?"
+        var info = "Claude will quit, which stops any running Code sessions, then reopen signed in as \(p.name). The current login is saved first and backed up."
+        if switchSyncEnabled, syncSelection.count >= 2 { info += " Chats are synced between the account folders picked in Account sync." }
+        alert.informativeText = info
+        alert.addButton(withTitle: "Switch")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        switchTo(p)
+    }
+
+    /// Reopen Claude signed out (without logging out) so another account can be logged in and saved.
+    func confirmAndAddAccount() {
+        guard !switching else { return }
+        let alert = NSAlert()
+        alert.messageText = "Add another account?"
+        alert.informativeText = "The current login is saved first. Claude will quit, which stops any running Code sessions, and reopen signed out. Log in to the other account there, then click Save This Login here.\n\nDo not use Log out inside Claude for this: logging out can end that login on the server, and then its saved copy stops working."
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        switching = true
+        switchSteps = []
+        let paths = self.paths
+        Task { @MainActor in
+            do {
+                let r = try await LoginProfiles.prepareFreshLogin(paths: paths) { step in
+                    onMainQueue { self.switchSteps.append(step) }
+                }
+                self.banner = r.notes.joined(separator: " ")
+            } catch {
+                self.banner = error.localizedDescription
+            }
+            self.switching = false
+            self.refresh()
+        }
+    }
+
+    func switchTo(_ p: LoginProfile) {
+        switching = true
+        switchSteps = []
+        let paths = self.paths
+        let sync: [String]? = switchSyncEnabled ? (snapshot?.folders.map(\.folder.id).filter { syncSelection.contains($0) }) : nil
+        Task { @MainActor in
+            var message: String
+            var warnings: [String] = []
+            do {
+                let r = try await LoginProfiles.switchTo(p, syncFolderIds: sync, paths: paths) { step in
+                    onMainQueue { self.switchSteps.append(step) }
+                }
+                warnings = r.warnings
+                message = r.notes.joined(separator: " ")
+            } catch {
+                message = error.localizedDescription
+                warnings = [message]
+            }
+            self.switching = false
+            self.refresh()
+            self.banner = message
+            if !warnings.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = "Switching to \(p.name) needs attention"
+                alert.informativeText = warnings.joined(separator: "\n\n")
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        }
     }
 
     // MARK: Index

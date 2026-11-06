@@ -1,6 +1,6 @@
 # Claude Helper
 
-A macOS menubar app for the Code tab of the Claude desktop app. It lists every Code session across all the accounts you have used on this Mac, searches your old chats, restores archived chats, keeps account folders in sync, and does bulk rename, pin and archive.
+A macOS menubar app for the Code tab of the Claude desktop app. It switches the Claude app between accounts you have logged in to before, lists every Code session across all those accounts, searches your old chats, restores archived chats, keeps account folders in sync, and does bulk rename, pin and archive.
 
 > **Unofficial.** Claude Helper is a community tool. It is not made, endorsed or supported by Anthropic, and it is not affiliated with Anthropic in any way. "Claude" is a trademark of Anthropic.
 
@@ -8,6 +8,7 @@ It works with Claude's undocumented local files. A Claude update can change them
 
 ## Features
 
+- **Switch accounts without logging in again.** Save the login of each account once, then switch Claude between them from the menu bar. The helper quits Claude, saves the current login (so refreshed tokens are kept), optionally syncs chats between the accounts, puts the chosen login in place and reopens Claude.
 - **Sessions browser.** One table of every Code session in every account folder: title, project, account folder, archived, pinned, last activity. Filter, sort, double-click to open the chat in Claude. Read-only, works while Claude is running.
 - **Search old chats.** Full-text search over your transcripts in `~/.claude/projects`, with a local SQLite index that updates incrementally in the background. A result opens the chat in Claude, or, for chats with no sidebar entry, copies the `claude --resume` command.
 - **Restore archived chats** back into the sidebar.
@@ -67,8 +68,9 @@ ClaudeHelper --cli backup         # back up all account folders now
 - **What it reads:**
   - `~/Library/Application Support/Claude/claude-code-sessions/` (sidebar entries),
   - `~/.claude/projects/` (transcripts, never modified),
-  - one key, `lastKnownAccountUuid`, from `~/Library/Application Support/Claude/config.json`, to show which account is signed in. Nothing else in that file is read.
-- **What it writes** is listed in the next section. Its own data lives in `~/Library/Application Support/ClaudeHelper/` (search index and backups). Delete that folder to remove everything it stored.
+  - `lastKnownAccountUuid` from `~/Library/Application Support/Claude/config.json`, to show which account is signed in,
+  - only when you save or switch accounts: the login keys in that `config.json` (`oauth:tokenCache`, `oauth:tokenCacheV2`) and Claude's `Cookies` database. These are already encrypted by Claude with its own key from the macOS Keychain. The helper copies them as they are. It never decrypts them, never reads the Keychain, and never shows, logs or sends them. From the cookie database it reads only cookie names and expiry dates, to tell you when a saved login expires.
+- **What it writes** is listed in the next section. Its own data lives in `~/Library/Application Support/ClaudeHelper/` (search index, backups, saved logins), readable only by your user. Delete that folder to remove everything it stored. Saved logins only work on the Mac they were saved on.
 - **macOS permission prompts:** none. Reading these folders and quitting Claude with `NSRunningApplication.terminate()` did not trigger a Files and Folders, Full Disk Access or Automation ("wants to control") prompt. This was tested on macOS 26 with the app launched normally under a bundle id the system had never seen. The helper does not use AppleScript.
 
 ## What each action writes
@@ -85,6 +87,9 @@ All paths below are inside `~/Library/Application Support/Claude/claude-code-ses
 | Account sync | `local_*.json` copied between the picked folders, `deleted_<id>` markers copied, `archived-sessions.idx` rebuilt | See below. |
 | Restore backup | the backed-up `local_*.json`, `archived-sessions.idx` and `deleted_*` | Files in the folder now that are not in the backup are moved into a new safety backup, not deleted. |
 | Back Up Now | none | Only writes a backup. |
+| Save this login | none | Copies `Cookies` and the login keys of `config.json` into `ClaudeHelper/profiles/<name>/`. Works while Claude runs. |
+| Switch account | `~/Library/Application Support/Claude/Cookies` (replaced, `Cookies-journal` removed) and the three login keys in `config.json` (every other key stays as it was) | The current login is saved to its profile and both files are backed up to `ClaudeHelper/backups/<date>-switch-login/` first. |
+| Add another account | moves `Cookies` out and removes the three login keys from `config.json` | Saves the current login first and keeps the moved files in `ClaudeHelper/backups/<date>-add-account/`. Claude reopens signed out. |
 
 Editing a chat changes only the top-level keys listed above. The rest of the file stays byte for byte the same (key order, numbers, escaping), and each patched file is re-parsed and compared before it is written.
 
@@ -103,6 +108,16 @@ For every chat found in any picked folder:
 3. **Schema guard.** Nothing is written if a chat file involved is not a JSON object, is missing `sessionId` or `cliSessionId`, or its `sessionId` does not match the file name, or if an `archived-sessions.idx` is not exactly `{"v":1,"archived":[...]}`. The preview shows the file and what looked wrong.
 4. **Allowlist.** The writer refuses any path other than `claude-code-sessions/<account>/<org>/` plus `local_*.json`, `archived-sessions.idx` or `deleted_*`. It never touches `~/.claude/projects`, `backlog/`, `waiting-input/` or `scheduled-tasks.json`, and those are not in backups either, so restoring a backup cannot touch them.
 5. **Atomic writes.** Files are written to a temporary file in the same folder and renamed into place, mode 600.
+
+## Switching accounts
+
+1. While Claude is signed in to your first account, open **Accounts** in the helper and click **Save This Login**.
+2. Click **Add Another Account**. Claude reopens signed out. Log in to the next account there, then click **Save This Login** again. Repeat for more accounts.
+3. From then on, pick an account from the menu bar icon. Claude quits, switches and reopens.
+
+Do not use **Log out** inside Claude to reach another account. Logging out can end that login on the server, and then its saved copy stops working. If a saved login has expired or Claude does not accept it, the helper says so: log in to that account once and save it again.
+
+Turn on **Sync chats** in Accounts to run an account sync between the folders picked in Account sync every time you switch, so each account sees the same Code sessions.
 
 ## Search index
 
@@ -131,7 +146,8 @@ With those set, the DMG is notarized with `notarytool` and stapled, and the Open
 
 ## Known gaps
 
-- **Pins.** Claude keeps a second pin record somewhere outside the chat file, and it can disagree with `isStarred`. Pin and unpin set `isStarred` only, so the sidebar may not follow.
+- **Pins.** Claude also keeps pins in its web storage (`starred-local-code-sessions` in Local Storage), which can disagree with `isStarred`. The helper sets `isStarred` only and does not edit Local Storage, so the sidebar may not follow.
+- **Account switching** swaps the files Claude uses for its login today. A Claude update can move them. The app's cached web data (Local Storage, IndexedDB) is not swapped, so the window can show the previous account's cached state for a moment after switching.
 - **Sidebar groups** and sections are not handled.
 - **Other accounts.** A chat that exists only in an account folder you are not signed in to may not open from the link. The helper warns, and account sync can copy it over.
 - **Large connector config.** A chat file with a very large `remoteMcpServersConfig` (over 100 KB) once failed to show in the sidebar after being copied to another account. The sync preview warns about these.

@@ -78,6 +78,46 @@ public enum TopLevelJSON {
         }
     }
 
+    /// Remove top-level keys (and their separating comma), leaving every other byte untouched.
+    public static func remove(_ data: Data, keys: [String]) throws -> Data {
+        var bytes = [UInt8](data)
+        for key in keys {
+            let (members, _) = try members(bytes)
+            guard let idx = members.firstIndex(where: { $0.key == key }) else { continue }
+            // The member starts at its key: walk back from the value start to the opening quote of the key.
+            var start = members[idx].valueRange.lowerBound
+            var quotes = 0
+            while start > 0 {
+                start -= 1
+                if bytes[start] == 0x22 && (start == 0 || bytes[start - 1] != 0x5C) {
+                    quotes += 1
+                    if quotes == 2 { break }
+                }
+            }
+            var end = members[idx].valueRange.upperBound
+            if idx < members.count - 1 {
+                // Drop the comma after this member.
+                while end < bytes.count, bytes[end] != 0x2C { end += 1 }
+                end += 1
+            } else if idx > 0 {
+                // Last member: drop the comma before it.
+                while start > 0, bytes[start - 1] != 0x2C { start -= 1 }
+                start -= 1
+            }
+            bytes.removeSubrange(start..<end)
+        }
+        let result = Data(bytes)
+        guard var before = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let after = try JSONSerialization.jsonObject(with: result) as? [String: Any] else {
+            throw HelperError.message("JSON remove produced something that is not an object")
+        }
+        keys.forEach { before[$0] = nil }
+        guard NSDictionary(dictionary: before).isEqual(to: after) else {
+            throw HelperError.message("JSON remove verification failed")
+        }
+        return result
+    }
+
     public static func encode(_ value: Any) throws -> Data {
         try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .withoutEscapingSlashes])
     }

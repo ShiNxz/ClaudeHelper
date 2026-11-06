@@ -174,5 +174,98 @@ enum SelfTest {
         try index.update(progress: { _ in }, cancelled: { false })
         check(try hits("narwhal") == 1 && (try hits("zebracorn")) == 1, "index: appended line indexed once, old lines not duplicated")
         check(TranscriptIndex.ftsQuery("\"exact phrase\" more") == "\"exact phrase\" \"more\"", "query: phrase plus word")
+
+        try await profileTests(paths)
+    }
+
+    static func sqlite(_ db: URL, _ sql: String) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        p.arguments = [db.path, sql]
+        let out = Pipe()
+        p.standardOutput = out
+        try p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Fake login: a config.json with made-up token strings and a cookie database with marker rows.
+    static func fakeLogin(_ paths: HelperPaths, account: String, token: String, marker: String, v1: Bool = true, locale: String = "en", expiresInDays: Double = 30) throws {
+        var config = "{\"locale\":\"\(locale)\","
+        if v1 { config += "\"oauth:tokenCache\":\"v1-\(token)\"," }
+        config += "\"oauth:tokenCacheV2\":\"v2-\(token)\",\"lastKnownAccountUuid\":\"\(account)\",\"windowState\":{\"x\":1}}"
+        try write(config, paths.claudeConfig)
+        let cookies = paths.claudeDir.appendingPathComponent("Cookies")
+        try? fm.removeItem(at: cookies)
+        let expires = Int64((Date().timeIntervalSince1970 + expiresInDays * 86400 + 11_644_473_600) * 1_000_000)
+        _ = try sqlite(cookies, "CREATE TABLE cookies(host_key TEXT, name TEXT, expires_utc INTEGER, encrypted_value BLOB);"
+            + "INSERT INTO cookies VALUES('.claude.ai','sessionKey',\(expires),x'763130');"
+            + "INSERT INTO cookies VALUES('.claude.ai','\(marker)',\(expires),x'763130');")
+    }
+
+    static func profileTests(_ paths: HelperPaths) async throws {
+        let j = Data(#"{"a":1,"b":"x","c":[1,2],"d":{"e":1}}"#.utf8)
+        check(String(decoding: try TopLevelJSON.remove(j, keys: ["b"]), as: UTF8.self) == #"{"a":1,"c":[1,2],"d":{"e":1}}"#, "json remove: middle key")
+        check(String(decoding: try TopLevelJSON.remove(j, keys: ["d"]), as: UTF8.self) == #"{"a":1,"b":"x","c":[1,2]}"#, "json remove: last key")
+        check(String(decoding: try TopLevelJSON.remove(j, keys: ["a"]), as: UTF8.self) == #"{"b":"x","c":[1,2],"d":{"e":1}}"#, "json remove: first key")
+        check(!paths.isLiveClaudeDir, "profile fixtures are not the live Claude folder")
+
+        let cookies = paths.claudeDir.appendingPathComponent("Cookies")
+        try fakeLogin(paths, account: "acct-a", token: "A", marker: "marker-a")
+        let work = try LoginProfiles.saveCurrent(name: "Work", paths: paths)
+        let workDir = paths.profilesDir.appendingPathComponent(work.id)
+        let dirPerms = (try fm.attributesOfItem(atPath: workDir.path)[.posixPermissions] as? NSNumber)?.intValue
+        let filePerms = (try fm.attributesOfItem(atPath: workDir.appendingPathComponent("auth.json").path)[.posixPermissions] as? NSNumber)?.intValue
+        check(work.accountId == "acct-a" && dirPerms == 0o700 && filePerms == 0o600, "save: profile stored with 0700 folder and 0600 files")
+        check(work.sessionExpires.map { $0 > Date() } == true, "save: session expiry read from the cookie metadata")
+
+        try fakeLogin(paths, account: "acct-b", token: "B", marker: "marker-b", locale: "he")
+        let personal = try LoginProfiles.saveCurrent(name: "Personal", paths: paths)
+        check(LoginProfiles.list(paths: paths).count == 2, "save: two profiles")
+        check(try LoginProfiles.saveCurrent(name: "Personal again", paths: paths).id == personal.id, "save: same account updates its profile")
+
+        // Claude refreshes the current account's tokens before the switch.
+        try write(#"{"locale":"he","oauth:tokenCache":"v1-B2","oauth:tokenCacheV2":"v2-B2","lastKnownAccountUuid":"acct-b","windowState":{"x":2}}"#, paths.claudeConfig)
+        _ = try sqlite(cookies, "INSERT INTO cookies VALUES('.claude.ai','marker-b2',0,x'763130');")
+
+        let r = try await LoginProfiles.switchTo(work, syncFolderIds: nil, paths: paths, step: { _ in })
+        let config = try JSONSerialization.jsonObject(with: Data(contentsOf: paths.claudeConfig)) as! [String: Any]
+        check(config["lastKnownAccountUuid"] as? String == "acct-a" && config["oauth:tokenCacheV2"] as? String == "v2-A"
+              && config["oauth:tokenCache"] as? String == "v1-A", "switch: login keys replaced")
+        check(config["locale"] as? String == "he" && (config["windowState"] as? [String: Any])?["x"] as? Int == 2, "switch: other config keys untouched")
+        let markerA = try sqlite(cookies, "SELECT count(*) FROM cookies WHERE name='marker-a'")
+        let markerB = try sqlite(cookies, "SELECT count(*) FROM cookies WHERE name LIKE 'marker-b%'")
+        check(markerA == "1" && markerB == "0", "switch: cookie database swapped")
+        let personalDir = paths.profilesDir.appendingPathComponent(personal.id)
+        let savedAuth = try JSONSerialization.jsonObject(with: Data(contentsOf: personalDir.appendingPathComponent("auth.json"))) as! [String: Any]
+        let refreshedCookie = try sqlite(personalDir.appendingPathComponent("Cookies"), "SELECT count(*) FROM cookies WHERE name='marker-b2'")
+        check(savedAuth["oauth:tokenCacheV2"] as? String == "v2-B2" && refreshedCookie == "1",
+              "switch: outgoing account re-saved with its refreshed login first")
+        check(r.loginBackup.map { fm.fileExists(atPath: $0.appendingPathComponent("config.json").path) && fm.fileExists(atPath: $0.appendingPathComponent("Cookies").path) } == true,
+              "switch: previous login files backed up")
+
+        // A profile saved without the older token key: the key must not linger from the other account.
+        try fakeLogin(paths, account: "acct-c", token: "C", marker: "marker-c", v1: false)
+        let noV1 = try LoginProfiles.saveCurrent(name: "No V1", paths: paths)
+        _ = try await LoginProfiles.switchTo(work, syncFolderIds: nil, paths: paths, step: { _ in })
+        _ = try await LoginProfiles.switchTo(noV1, syncFolderIds: nil, paths: paths, step: { _ in })
+        let config2 = try JSONSerialization.jsonObject(with: Data(contentsOf: paths.claudeConfig)) as! [String: Any]
+        check(config2["oauth:tokenCache"] == nil && config2["lastKnownAccountUuid"] as? String == "acct-c", "switch: keys missing from the profile are removed")
+
+        // Add another account: current login saved, login files moved aside, Claude left signed out.
+        let fresh = try await LoginProfiles.prepareFreshLogin(paths: paths, step: { _ in })
+        let config3 = try JSONSerialization.jsonObject(with: Data(contentsOf: paths.claudeConfig)) as! [String: Any]
+        check(config3["lastKnownAccountUuid"] == nil && config3["oauth:tokenCacheV2"] == nil && config3["locale"] != nil
+              && !fm.fileExists(atPath: cookies.path), "add account: login keys and cookies moved aside, other keys kept")
+        check(fresh.loginBackup.map { fm.fileExists(atPath: $0.appendingPathComponent("Cookies").path) } == true, "add account: cookies kept in the backup")
+        check(LoginProfiles.list(paths: paths).count == 3, "add account: no extra profile created")
+
+        // Expired logins are refused with a clear message.
+        var expired = work
+        expired.sessionExpires = Date().addingTimeInterval(-3600)
+        var message = ""
+        do { _ = try await LoginProfiles.switchTo(expired, syncFolderIds: nil, paths: paths, step: { _ in }) } catch { message = error.localizedDescription }
+        check(message.contains("expired") && message.contains("save it again"), "switch: expired login refused with a clear message")
     }
 }

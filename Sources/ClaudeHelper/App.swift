@@ -30,6 +30,23 @@ struct MenuContent: View {
         Button("Search Chats") { show(.search) }
         Button("Account Sync") { show(.sync) }
         Divider()
+        if model.switching {
+            Text("Switching: " + (model.switchSteps.last ?? "starting"))
+        } else if model.profiles.isEmpty {
+            Button("Save Current Login...") { show(.accounts) }
+        } else {
+            Text("Switch Claude account")
+            ForEach(model.profiles) { p in
+                Button {
+                    model.confirmAndSwitch(p)
+                } label: {
+                    if p.id == model.activeProfile?.id { Text("\u{2713} " + p.name) } else { Text("     " + p.name) }
+                }
+                .disabled(p.id == model.activeProfile?.id)
+            }
+            Button("Manage Accounts...") { show(.accounts) }
+        }
+        Divider()
         Text(model.indexStatusText)
         if model.indexProgress.isRunning {
             Button("Stop Indexing") { model.cancelIndexing() }
@@ -75,6 +92,7 @@ struct MainView: View {
                 switch model.section {
                 case .sessions: SessionsView()
                 case .search: SearchView()
+                case .accounts: AccountsView()
                 case .sync: SyncView()
                 case .backups: BackupsView()
                 }
