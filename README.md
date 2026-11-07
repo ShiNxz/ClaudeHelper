@@ -113,9 +113,13 @@ For every chat found in any picked folder:
 
 ## Switching accounts
 
-1. While Claude is signed in to your first account, open **Accounts** in the helper and click **Save This Login**.
-2. Click **Add Another Account**. Claude reopens signed out. Log in to the next account there. The helper saves it by itself within a minute (or click **Save This Login**). Repeat for more accounts.
-3. From then on, pick an account from the menu bar icon. Claude quits, switches and reopens.
+**Accounts** lists every account used on this Mac, by email, and the menu bar icon shows the same list.
+
+1. The account Claude is signed in to has a **Save** button. Click it once.
+2. Every other account has **Log In and Save**. Claude reopens signed out (nothing is logged out). Log in to that account there, and the helper saves it by itself within a minute.
+3. From then on, pick any saved account from the menu bar or click **Switch**. Claude quits, switches and reopens.
+
+**Add Another Account** is for an account that has never been used on this Mac.
 
 Two things end a saved login, because Claude ends that session on the server:
 

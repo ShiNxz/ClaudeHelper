@@ -32,21 +32,16 @@ struct MenuContent: View {
         Divider()
         if model.switching {
             Text("Switching: " + (model.switchSteps.last ?? "starting"))
-        } else if model.profiles.isEmpty {
-            Button("Save Current Login...") { show(.accounts) }
-        } else {
-            Text("Switch Claude account")
-            ForEach(model.profiles) { p in
-                Button {
-                    model.confirmAndSwitch(p)
-                } label: {
-                    if p.id == model.activeProfile?.id {
-                        Text("\u{2713} " + p.name)
-                    } else {
-                        Text("     " + p.name + (p.needsLogin ? " (log in again)" : ""))
-                    }
+        } else if !model.accountEntries.isEmpty {
+            Text("Claude account")
+            ForEach(model.accountEntries) { e in
+                if e.isActive {
+                    Button("\u{2713} " + e.title) {}.disabled(true)
+                } else if let p = e.profile, !p.needsLogin {
+                    Button("     " + e.title) { model.activate(e) }
+                } else {
+                    Button("     " + e.title + (e.profile == nil ? " (log in to save)" : " (log in again)")) { model.activate(e) }
                 }
-                .disabled(p.id == model.activeProfile?.id)
             }
             Button("Manage Accounts...") { show(.accounts) }
         }

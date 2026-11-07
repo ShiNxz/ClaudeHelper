@@ -343,6 +343,17 @@ enum SelfTest {
         let ok = try await LoginProfiles.switchTo(yAgain, syncFolderIds: nil, paths: paths, verifier: { _ in .accepted }, step: { _ in })
         check(ok.warnings.isEmpty && LoginProfiles.currentAccountId(paths: paths) == yId, "switch: accepted login stays in place")
 
+        // Log In and Save: a new account is saved by itself once Claude has settled after the sign-in.
+        let zId = "cccccccc-0000-0000-0000-00000000000c"
+        try fakeLogin(paths, account: zId, token: "Z", marker: "marker-z")
+        try appendLog(paths, logLine(Date(), "Login-state transition (loggedOut: true \u{2192} false, uuid: <none> \u{2192} \(zId))"))
+        check(LoginProfiles.saveNewIfSettled(account: zId, name: "z@example.com", paths: paths) == nil, "log in and save: waits while Claude settles")
+        try appendLog(paths, logLine(Date().addingTimeInterval(-60), "Login-state transition (loggedOut: true \u{2192} false, uuid: <none> \u{2192} \(zId))"))
+        let z = LoginProfiles.saveNewIfSettled(account: zId, name: "z@example.com", paths: paths)
+        check(z?.accountId == zId && z?.name == "z@example.com", "log in and save: new account saved by itself")
+        check(LoginProfiles.saveNewIfSettled(account: zId, name: "again", paths: paths) == nil, "log in and save: no second profile")
+        try fakeLogin(paths, account: yId, token: "Y", marker: "marker-y")
+
         // Self-refresh: the signed-in account's copy is re-saved and its flag cleared.
         var yMeta = LoginProfiles.list(paths: paths).first { $0.id == y.id }!
         yMeta.problem = "stale"

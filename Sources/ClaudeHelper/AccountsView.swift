@@ -3,7 +3,6 @@ import SwiftUI
 
 struct AccountsView: View {
     @Environment(AppModel.self) private var model
-    @State private var newName = ""
     @State private var renaming: LoginProfile?
     @State private var renameText = ""
 
@@ -11,52 +10,29 @@ struct AccountsView: View {
         @Bindable var model = model
         Form {
             Section {
-                Text("Save the account Claude is signed in to now, then use Add Another Account to log in to the next one and save it too. After that, switch between them from the menu bar without logging in again. The signed-in account's saved copy refreshes by itself every few minutes.\n\nTwo things end a saved login: Log out inside Claude, and signing in to that account again by hand. Use Switch and Add Another Account instead. If a saved login stops working, the helper switches you back and marks it, and Log In Again fixes it.")
+                Text("Every account used on this Mac is listed here. Switch between saved ones from here or from the menu bar, without logging in again. For an account that is not saved yet, click Log In and Save once.")
                     .foregroundStyle(.secondary)
-            }
-            Section("Signed in now") {
-                HStack {
-                    if let id = model.snapshot?.activeAccountId {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(model.email(forAccount: id) ?? "Account " + String(id.prefix(8)))
-                            Text(model.activeProfile.map { "Saved as " + $0.name } ?? "Not saved yet")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    } else {
-                        Text("Claude does not look signed in.").foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    TextField("", text: $newName, prompt: Text(model.activeProfile?.name ?? model.email(forAccount: model.snapshot?.activeAccountId) ?? "Name, e.g. Work"))
-                        .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 180)
-                    Button(model.activeProfile == nil ? "Save This Login" : "Save Again") {
-                        model.saveCurrentLogin(name: newName.isEmpty
-                            ? (model.activeProfile?.name ?? model.email(forAccount: model.snapshot?.activeAccountId) ?? "")
-                            : newName)
-                        newName = ""
-                    }
-                    .disabled(model.snapshot?.activeAccountId == nil || model.switching)
-                }
+                Text("Don't use Log out inside Claude, and don't sign in to a saved account by hand: both end its saved login. The signed-in account's saved copy refreshes by itself.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
             Section {
-                if model.profiles.isEmpty {
-                    Text("No saved accounts yet.").foregroundStyle(.secondary)
+                if model.accountEntries.isEmpty {
+                    Text("No accounts found yet.").foregroundStyle(.secondary)
                 }
-                ForEach(model.profiles) { p in
-                    ProfileRow(profile: p, email: model.email(forAccount: p.accountId), active: p.id == model.activeProfile?.id,
-                               onSwitch: { model.confirmAndSwitch(p) },
-                               onLogInAgain: { model.confirmAndLogInAgain(p) },
-                               onRename: { renaming = p; renameText = p.name },
-                               onDelete: { model.deleteProfile(p) })
+                ForEach(model.accountEntries) { e in
+                    AccountRow(entry: e, switching: model.switching,
+                               onActivate: { model.activate(e) },
+                               onSave: { model.saveCurrentLogin(name: e.email ?? e.title) },
+                               onRename: e.profile.map { p in { renaming = p; renameText = p.name } },
+                               onForget: e.profile.map { p in { model.deleteProfile(p) } })
                 }
             } header: {
                 HStack {
-                    Text("Saved accounts")
+                    Text("Accounts")
                     Spacer()
                     Button("Add Another Account...") { model.confirmAndAddAccount() }
                         .disabled(model.switching)
-                        .help("Saves this login, then reopens Claude signed out so you can log in to another account")
+                        .help("For an account never used on this Mac: reopens Claude signed out so you can log in to it")
                 }
             }
             Section("When switching") {
@@ -81,12 +57,12 @@ struct AccountsView: View {
         .onAppear { model.refresh() }
         .sheet(item: $renaming) { p in
             VStack(alignment: .leading, spacing: 12) {
-                Text("Rename saved account").font(.headline)
+                Text("Name for this account").font(.headline)
                 TextField("Name", text: $renameText).textFieldStyle(.roundedBorder).frame(width: 300)
                 HStack {
                     Spacer()
                     Button("Cancel") { renaming = nil }.keyboardShortcut(.cancelAction)
-                    Button("Rename") { model.renameProfile(p, to: renameText); renaming = nil }.keyboardShortcut(.defaultAction)
+                    Button("Save") { model.renameProfile(p, to: renameText); renaming = nil }.keyboardShortcut(.defaultAction)
                 }
             }
             .padding(20)
@@ -94,52 +70,46 @@ struct AccountsView: View {
     }
 }
 
-struct ProfileRow: View {
-    let profile: LoginProfile
-    let email: String?
-    let active: Bool
-    let onSwitch: () -> Void
-    let onLogInAgain: () -> Void
-    let onRename: () -> Void
-    let onDelete: () -> Void
+struct AccountRow: View {
+    let entry: AppModel.AccountEntry
+    let switching: Bool
+    let onActivate: () -> Void
+    let onSave: () -> Void
+    let onRename: (() -> Void)?
+    let onForget: (() -> Void)?
 
-    var detailText: String {
-        var who = ""
-        if let email {
-            if email != profile.name { who = email + ", " }
-        } else {
-            who = "Account " + String((profile.accountId ?? "unknown").prefix(8)) + ", "
+    var status: (text: String, warning: Bool) {
+        guard let p = entry.profile else {
+            return (entry.isActive ? "Signed in, not saved yet" : "Not saved yet", false)
         }
-        return who + "saved " + profile.savedAt.formatted(date: .abbreviated, time: .shortened) + ", " + expiryText
-    }
-
-    var expiryText: String {
-        guard let e = profile.sessionExpires else { return "login expiry unknown" }
-        return (profile.isExpired ? "login expired " : "login valid until ") + e.formatted(date: .abbreviated, time: .omitted)
+        if let problem = p.problem { return (problem, true) }
+        if p.isExpired { return ("Saved login expired. Use Log In Again.", true) }
+        var t = "Saved " + p.savedAt.formatted(date: .abbreviated, time: .shortened)
+        if let e = p.sessionExpires { t += ", valid until " + e.formatted(date: .abbreviated, time: .omitted) }
+        return (t, false)
     }
 
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(profile.name)
-                    if active { Text("signed in").font(.caption).foregroundStyle(.green) }
+                    Text(entry.title)
+                    if let n = entry.nickname { Text(n).foregroundStyle(.secondary) }
+                    if entry.isActive { Text("signed in").font(.caption).foregroundStyle(.green) }
                 }
-                Text(detailText)
-                    .font(.caption).foregroundStyle(.secondary)
-                if let problem = profile.problem {
-                    Text(problem).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                } else if profile.isExpired {
-                    Text("This saved login expired. Use Log In Again.").font(.caption).foregroundStyle(.orange)
-                }
+                Text(status.text).font(.caption)
+                    .foregroundStyle(status.warning ? .orange : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
-            Button("Rename", action: onRename)
-            Button("Delete", action: onDelete)
-            if profile.needsLogin && !active {
-                Button("Log In Again", action: onLogInAgain)
+            if let onRename { Button("Rename", action: onRename) }
+            if let onForget { Button("Forget", action: onForget).help("Delete the helper's saved copy of this login") }
+            if entry.isActive {
+                if entry.profile == nil { Button("Save", action: onSave).disabled(switching) }
+            } else if let p = entry.profile, !p.needsLogin {
+                Button("Switch", action: onActivate).disabled(switching)
             } else {
-                Button("Switch", action: onSwitch).disabled(active)
+                Button(entry.profile == nil ? "Log In and Save" : "Log In Again", action: onActivate).disabled(switching)
             }
         }
     }

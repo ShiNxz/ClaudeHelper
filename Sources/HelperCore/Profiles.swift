@@ -213,6 +213,16 @@ public enum LoginProfiles {
         return p
     }
 
+    /// Save the signed-in account under `name` if it has no saved login yet, once Claude has settled
+    /// after the sign-in. Used after Log In and Save, so the user does not have to click anything.
+    @discardableResult
+    public static func saveNewIfSettled(account: String, name: String, paths: HelperPaths) -> LoginProfile? {
+        guard currentAccountId(paths: paths) == account, profile(forAccount: account, paths: paths) == nil,
+              isSignedIn(paths: paths) else { return nil }
+        if let last = ClaudeLog.loginEvents(paths: paths, tailBytes: 1 << 20).last, Date().timeIntervalSince(last.date) < 20 { return nil }
+        return try? saveCurrent(name: name, paths: paths)
+    }
+
     /// Flag saved logins that Claude's log shows were signed out after they were saved.
     public static func updateProblems(paths: HelperPaths) {
         let events = ClaudeLog.loginEvents(paths: paths, tailBytes: 2 << 20)

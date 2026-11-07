@@ -121,10 +121,15 @@ final class AppModel {
     /// Keep the signed-in account's saved login current and flag saved logins that stopped working.
     /// Runs off the main thread; skipped while a switch is in progress.
     func maintainProfiles() {
-        guard !switching, !profiles.isEmpty else { return }
+        guard !switching, !profiles.isEmpty || awaitingLogin != nil else { return }
         let paths = self.paths
+        let awaiting = awaitingLogin
+        let newName = awaiting.flatMap { accountEmails[$0] } ?? awaiting.map { "Account " + String($0.prefix(8)) }
         DispatchQueue.global(qos: .utility).async {
-            let refreshed = LoginProfiles.refreshActive(paths: paths)
+            var refreshed = LoginProfiles.refreshActive(paths: paths)
+            if refreshed == nil, let awaiting, let newName {
+                refreshed = LoginProfiles.saveNewIfSettled(account: awaiting, name: newName, paths: paths)
+            }
             LoginProfiles.updateProblems(paths: paths)
             let list = LoginProfiles.list(paths: paths)
             onMainQueue {
@@ -132,7 +137,7 @@ final class AppModel {
                 self.profiles = list
                 if let r = refreshed, self.awaitingLogin == r.accountId || self.awaitingLogin == r.id {
                     self.awaitingLogin = nil
-                    self.banner = "Saved the new login for \(r.name). Switching to it works again."
+                    self.banner = "Saved the login for \(self.email(forAccount: r.accountId) ?? r.name). You can switch to it from the menu bar now."
                 }
             }
         }
@@ -319,6 +324,37 @@ final class AppModel {
 
     // MARK: Login profiles
 
+    struct AccountEntry: Identifiable {
+        let id: String          // account id
+        let email: String?
+        let profile: LoginProfile?
+        let isActive: Bool
+        var title: String { email ?? profile?.name ?? "Account " + String(id.prefix(8)) }
+        /// The saved name, shown only when it says something the email does not.
+        var nickname: String? { profile.flatMap { $0.name == email ? nil : $0.name } }
+    }
+
+    /// Every account seen on this Mac: account folders, saved logins and the signed-in account.
+    var accountEntries: [AccountEntry] {
+        var ids: [String] = []
+        func add(_ id: String?) { if let id, !ids.contains(id) { ids.append(id) } }
+        add(snapshot?.activeAccountId)
+        for f in snapshot?.folders ?? [] where !f.folder.isBackupCopy { add(f.folder.accountId) }
+        for p in profiles { add(p.accountId) }
+        let active = snapshot?.activeAccountId
+        return ids.map { id in
+            AccountEntry(id: id, email: accountEmails[id], profile: profiles.first { $0.accountId == id }, isActive: id == active)
+        }.sorted { a, b in
+            if a.isActive != b.isActive { return a.isActive }
+            return a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
+        }
+    }
+
+    /// One action per account: switch to it, or log in to it (saving it by itself afterwards).
+    func activate(_ e: AccountEntry) {
+        if let p = e.profile, !p.needsLogin { confirmAndSwitch(p) } else { confirmAndLogIn(accountId: e.id, who: e.title) }
+    }
+
     var activeProfile: LoginProfile? { profiles.first { $0.accountId != nil && $0.accountId == snapshot?.activeAccountId } }
 
     func saveCurrentLogin(name: String) {
@@ -339,9 +375,9 @@ final class AppModel {
 
     func deleteProfile(_ p: LoginProfile) {
         let alert = NSAlert()
-        alert.messageText = "Delete the saved login \(p.name)?"
-        alert.informativeText = "Only the helper's saved copy is removed. Claude and your chats are not touched."
-        alert.addButton(withTitle: "Delete")
+        alert.messageText = "Forget the saved login for \(email(forAccount: p.accountId) ?? p.name)?"
+        alert.informativeText = "Only the helper's saved copy is removed. Claude, the account and your chats are not touched. You can log in and save it again later."
+        alert.addButton(withTitle: "Forget")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -392,19 +428,22 @@ final class AppModel {
         }
     }
 
-    /// For a saved login that stopped working: reopen Claude signed out (without logging anything out)
-    /// so the user can log in to that account; the helper saves it by itself once they are in.
     func confirmAndLogInAgain(_ p: LoginProfile) {
+        confirmAndLogIn(accountId: p.accountId ?? p.id, who: email(forAccount: p.accountId) ?? p.name)
+    }
+
+    /// Reopen Claude signed out (without logging anything out) so the user can log in to `who`;
+    /// the helper saves that login by itself once they are in.
+    func confirmAndLogIn(accountId: String, who: String) {
         guard !switching else { return }
-        let who = email(forAccount: p.accountId) ?? p.name
         let alert = NSAlert()
-        alert.messageText = "Log in to \(who) again?"
-        alert.informativeText = "The current login is saved first. Claude quits, which stops any running Code sessions, and reopens signed out. Log in to \(who) there. The helper saves the new login by itself within a minute, and switching to it works again."
+        alert.messageText = "Log in to \(who)?"
+        alert.informativeText = "The current login is saved first. Claude quits, which stops any running Code sessions, and reopens signed out. Log in to \(who) there. The helper saves that login by itself within a minute, and from then on you can switch to it from the menu bar."
         alert.addButton(withTitle: "Continue")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        awaitingLogin = p.accountId ?? p.id
+        awaitingLogin = accountId
         switching = true
         switchSteps = []
         let paths = self.paths
