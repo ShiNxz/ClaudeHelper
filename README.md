@@ -45,7 +45,7 @@ git clone https://github.com/ShiNxz/ClaudeHelper.git
 cd ClaudeHelper
 ./bundle.sh                       # build/Claude Helper.app for this Mac
 ./bundle.sh --universal --dmg     # arm64 + x86_64 app and a DMG
-./bundle.sh --install             # copy the app to /Applications
+./bundle.sh --install             # copy the app to /Applications (quits and reopens a running copy)
 ```
 
 The app is ad-hoc signed (`codesign -s -`). Set `SIGN_IDENTITY` to a Developer ID identity to sign it properly with the hardened runtime. The app is not sandboxed, because the sandbox would block it from reading Claude's folders.

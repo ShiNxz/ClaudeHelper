@@ -102,11 +102,27 @@ if [ "$DMG" = 1 ]; then
 fi
 
 if [ "$INSTALL" = 1 ]; then
-  if pgrep -f "Claude Helper.app/Contents/MacOS/ClaudeHelper" >/dev/null; then
-    echo "Quit the running Claude Helper first." >&2
-    exit 1
+  # The pattern has no space, so it never matches Claude's own "Claude Helper" processes.
+  PATTERN="Claude Helper.app/Contents/MacOS/ClaudeHelper"
+  WAS_RUNNING=0
+  if pgrep -f "$PATTERN" >/dev/null; then
+    WAS_RUNNING=1
+    echo "Quitting the running Claude Helper"
+    pkill -TERM -f "$PATTERN" || true
+    for _ in $(seq 1 20); do
+      pgrep -f "$PATTERN" >/dev/null || break
+      sleep 0.5
+    done
+    if pgrep -f "$PATTERN" >/dev/null; then
+      echo "Claude Helper did not quit. Quit it from its menu bar icon and run this again." >&2
+      exit 1
+    fi
   fi
   rm -rf "/Applications/Claude Helper.app"
   cp -R "$APP" /Applications/
   echo "Installed /Applications/Claude Helper.app"
+  if [ "$WAS_RUNNING" = 1 ]; then
+    open "/Applications/Claude Helper.app"
+    echo "Reopened Claude Helper"
+  fi
 fi
