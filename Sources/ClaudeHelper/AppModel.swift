@@ -440,7 +440,7 @@ final class AppModel {
         let paths = self.paths
         Task { @MainActor in
             do {
-                let r = try await LoginProfiles.prepareFreshLogin(paths: paths) { step in
+                let r = try await LoginProfiles.prepareFreshLogin(paths: paths, syncFolderIds: self.switchSyncEnabled ? self.syncFolderIds : nil) { step in
                     onMainQueue { self.switchSteps.append(step) }
                 }
                 self.banner = r.notes.joined(separator: " ")
@@ -462,7 +462,9 @@ final class AppModel {
         guard !switching else { return }
         let alert = NSAlert()
         alert.messageText = "Log in to \(who)?"
-        alert.informativeText = "The current login is saved first. Claude quits, which stops any running Code sessions, and reopens signed out. Log in to \(who) there. The helper saves that login by itself within a minute, and from then on you can switch to it from the menu bar."
+        var info = "The current login is saved first. Claude quits, which stops any running Code sessions, and reopens signed out. Log in to \(who) there. The helper saves that login by itself within a minute, and from then on you can switch to it from the menu bar."
+        if switchSyncEnabled, syncFolderIds.count >= 2 { info += " Chats are merged between the accounts picked in Sync chats first." }
+        alert.informativeText = info
         alert.addButton(withTitle: "Continue")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
@@ -473,7 +475,7 @@ final class AppModel {
         let paths = self.paths
         Task { @MainActor in
             do {
-                _ = try await LoginProfiles.prepareFreshLogin(paths: paths) { step in
+                _ = try await LoginProfiles.prepareFreshLogin(paths: paths, syncFolderIds: self.switchSyncEnabled ? self.syncFolderIds : nil) { step in
                     onMainQueue { self.switchSteps.append(step) }
                 }
                 self.banner = "Claude is signed out. Log in to \(who) there. The helper saves it by itself once you are in."

@@ -138,7 +138,7 @@ Open **Sync chats**, tick the accounts, and choose how:
 - **Merge:** every picked account ends up with every chat. When two accounts have the same chat, the newest copy wins, and a chat deleted in one account stays deleted in all of them.
 - **Copy from one account to the others:** for example from the account you are signed in to. It only adds and updates chats in the other accounts, never deletes anything there, and never writes to the account it copies from. If an account already has a newer copy of a chat, it keeps its copy.
 
-Claude keeps one chat list per account per organization. An account that used more than one organization has several, and all of them are included, so you never have to pick folders. **Preview** shows every change before anything is written. Turn on the merge option in **Accounts** to merge the picked accounts on every switch.
+Claude keeps one chat list per account per organization. An account that used more than one organization has several, and all of them are included, so you never have to pick folders. **Preview** shows every change before anything is written. Turn on the merge option in **Accounts** to merge the picked accounts on every switch, Log In and Save, and Add Another Account, so a chat made in one account is never left behind when you move to another.
 
 ## Search index
 

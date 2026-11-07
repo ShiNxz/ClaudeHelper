@@ -182,6 +182,7 @@ enum SelfTest {
 
         try await profileTests(paths)
         try copyTests(base)
+        try await freshLoginMergeTest(base)
     }
 
     /// One-way copy from one account (two organizations) into two others.
@@ -224,6 +225,22 @@ enum SelfTest {
         check(SchemaGuard.parseArchivedIndex(uAfter["archived-sessions.idx"]!).ids == ["local_c2"], "copy: archived list follows the copied chats")
         check(Planner.plan(.copy(sourceFolderIds: ["acct-s/org-1", "acct-s/org-2"], targetFolderIds: ["acct-t/org-1", "acct-u/org-1"]), paths: paths).changes.isEmpty,
               "copy: a second copy has nothing to do")
+    }
+
+    /// Log In and Save / Add Another Account merge chats first when that option is on.
+    static func freshLoginMergeTest(_ base: URL) async throws {
+        let paths = HelperPaths(sessionsRoot: base.appendingPathComponent("copy-sessions"),
+                                claudeConfig: base.appendingPathComponent("fresh/config.json"),
+                                projectsRoot: base.appendingPathComponent("projects"),
+                                dataDir: base.appendingPathComponent("copy-data"),
+                                claudeLog: base.appendingPathComponent("fresh.log"))
+        try write(#"{"locale":"en"}"#, paths.claudeConfig)
+        let t = paths.sessionsRoot.appendingPathComponent("acct-t/org-1"), u = paths.sessionsRoot.appendingPathComponent("acct-u/org-1")
+        try write(session("n1", title: "Made just before leaving", archived: false, cli: "kn1"), t.appendingPathComponent("local_n1.json"))
+        let r = try await LoginProfiles.prepareFreshLogin(paths: paths, syncFolderIds: ["acct-t/org-1", "acct-u/org-1"], step: { _ in })
+        check(fm.fileExists(atPath: u.appendingPathComponent("local_n1.json").path) && r.syncBackup != nil,
+              "log in and save: chats merged before signing out")
+        check(contents(t) == contents(u), "log in and save: both accounts hold the same chats afterwards")
     }
 
     static func sqlite(_ db: URL, _ sql: String) throws -> String {

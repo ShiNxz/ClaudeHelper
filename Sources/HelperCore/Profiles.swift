@@ -244,7 +244,7 @@ public enum LoginProfiles {
 
     /// Reopen Claude signed out without logging out, so saved logins stay valid on the server.
     /// The current login is saved first; the login files are moved into a backup, not deleted.
-    public static func prepareFreshLogin(paths: HelperPaths, bundleID: String = ClaudeApp.bundleID,
+    public static func prepareFreshLogin(paths: HelperPaths, syncFolderIds: [String]? = nil, bundleID: String = ClaudeApp.bundleID,
                                          step: @escaping @Sendable (String) -> Void) async throws -> SwitchResult {
         var result = SwitchResult()
         var quitByUs = false
@@ -255,6 +255,7 @@ public enum LoginProfiles {
         }
         do {
             _ = try saveOutgoing(paths: paths, result: &result, step: step)
+            try mergeChats(syncFolderIds, paths: paths, result: &result, step: step)
             step("Moving the login files aside")
             let backup = try makeLoginBackupDir(paths: paths, suffix: "add-account")
             result.loginBackup = backup
@@ -321,6 +322,21 @@ public enum LoginProfiles {
         let p = try saveCurrent(name: "Account " + String(current.prefix(8)), paths: paths)
         result.notes.append("The current account had no saved login, so it was saved as \(p.name).")
         return p
+    }
+
+    /// Merge chats between the given folders while Claude is closed, so chats made in the account
+    /// being left are not stuck there. Problems skip the merge with a warning instead of failing.
+    static func mergeChats(_ ids: [String]?, paths: HelperPaths, result: inout SwitchResult, step: (String) -> Void) throws {
+        guard let ids, ids.count >= 2 else { return }
+        step("Merging chats between accounts")
+        let plan = Planner.plan(.sync(folderIds: ids), paths: paths)
+        if !plan.problems.isEmpty {
+            result.warnings.append("Chat merge skipped: " + plan.problems.map { $0.path.lastPathComponent + ": " + $0.message }.joined(separator: "; "))
+        } else if !plan.changes.isEmpty {
+            let r = try Executor.apply(plan, paths: paths)
+            result.syncBackup = r.backup.dir
+            result.notes.append("Merged chats: \(r.written) written, \(r.moved) moved to the backup.")
+        }
     }
 
     /// Put a profile's login files in place, after backing up the current ones. Claude must not be running.
@@ -413,17 +429,7 @@ public enum LoginProfiles {
         do {
             outgoing = try saveOutgoing(paths: paths, result: &result, step: step)
 
-            if let ids = syncFolderIds, ids.count >= 2 {
-                step("Syncing chats between account folders")
-                let plan = Planner.plan(.sync(folderIds: ids), paths: paths)
-                if !plan.problems.isEmpty {
-                    result.warnings.append("Chat sync skipped: " + plan.problems.map { $0.path.lastPathComponent + ": " + $0.message }.joined(separator: "; "))
-                } else if !plan.changes.isEmpty {
-                    let r = try Executor.apply(plan, paths: paths)
-                    result.syncBackup = r.backup.dir
-                    result.notes.append("Synced chats: \(r.written) written, \(r.moved) moved to the backup.")
-                }
-            }
+            try mergeChats(syncFolderIds, paths: paths, result: &result, step: step)
 
             step("Restoring the login for \(target.name)")
             result.loginBackup = try restoreFiles(of: target, paths: paths, backupSuffix: "switch-login")
