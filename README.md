@@ -70,6 +70,7 @@ ClaudeHelper --cli backup         # back up all account folders now
   - `~/Library/Application Support/Claude/claude-code-sessions/` (sidebar entries),
   - `~/.claude/projects/` (transcripts, never modified). Besides chat text, the indexer notes which account each transcript belongs to and the email Claude recorded for it, so account folders can be labeled with emails instead of ids,
   - `lastKnownAccountUuid` from `~/Library/Application Support/Claude/config.json`, to show which account is signed in,
+  - sign-in and sign-out lines from Claude's log, `~/Library/Logs/Claude/main.log`, to tell whether a switch worked and whether a saved login was ended. Other log lines are skipped and nothing from the log is stored,
   - only when you save or switch accounts: the login keys in that `config.json` (`oauth:tokenCache`, `oauth:tokenCacheV2`) and Claude's `Cookies` database. These are already encrypted by Claude with its own key from the macOS Keychain. The helper copies them as they are. It never decrypts them, never reads the Keychain, and never shows, logs or sends them. From the cookie database it reads only cookie names and expiry dates, to tell you when a saved login expires.
 - **What it writes** is listed in the next section. Its own data lives in `~/Library/Application Support/ClaudeHelper/` (search index, backups, saved logins), readable only by your user. Delete that folder to remove everything it stored. Saved logins only work on the Mac they were saved on.
 - **macOS permission prompts:** none. Reading these folders and quitting Claude with `NSRunningApplication.terminate()` did not trigger a Files and Folders, Full Disk Access or Automation ("wants to control") prompt. This was tested on macOS 26 with the app launched normally under a bundle id the system had never seen. The helper does not use AppleScript.
@@ -113,12 +114,21 @@ For every chat found in any picked folder:
 ## Switching accounts
 
 1. While Claude is signed in to your first account, open **Accounts** in the helper and click **Save This Login**.
-2. Click **Add Another Account**. Claude reopens signed out. Log in to the next account there, then click **Save This Login** again. Repeat for more accounts.
+2. Click **Add Another Account**. Claude reopens signed out. Log in to the next account there. The helper saves it by itself within a minute (or click **Save This Login**). Repeat for more accounts.
 3. From then on, pick an account from the menu bar icon. Claude quits, switches and reopens.
 
-Do not use **Log out** inside Claude to reach another account. Logging out can end that login on the server, and then its saved copy stops working. If a saved login has expired or Claude does not accept it, the helper says so: log in to that account once and save it again.
+Two things end a saved login, because Claude ends that session on the server:
 
-Turn on **Sync chats** in Accounts to run an account sync between the folders picked in Account sync every time you switch, so each account sees the same Code sessions.
+- **Log out** inside Claude.
+- **Signing in to the same account again by hand.** Claude revokes the older sign-in about a minute later.
+
+So switch only with the helper. To keep saved logins valid, the helper re-saves the signed-in account every few minutes and again right before each switch. It never saves while Claude is signed out.
+
+After a switch the helper reads Claude's log. If Claude rejects the saved login, the helper puts the previous account back and marks the rejected one **Log in again**. **Log In Again** reopens Claude signed out (nothing is logged out), you log in to that account, and the helper saves it by itself.
+
+### Same chats in every account
+
+Claude keeps a separate chat list per account, and inside an account per organization. In **Account sync**, click **Pick Main Folders** to pick the folder each account actually uses, untick accounts you want to leave out, then **Preview Sync** and apply. Turn on **Sync chats** in **Accounts** to repeat the sync on every switch.
 
 ## Search index
 

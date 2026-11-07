@@ -11,12 +11,15 @@ public struct HelperPaths: Sendable {
     public var projectsRoot: URL
     /// ~/Library/Application Support/ClaudeHelper
     public var dataDir: URL
+    /// ~/Library/Logs/Claude/main.log (read only for sign-in and sign-out events)
+    public var claudeLog: URL
 
-    public init(sessionsRoot: URL, claudeConfig: URL, projectsRoot: URL, dataDir: URL) {
+    public init(sessionsRoot: URL, claudeConfig: URL, projectsRoot: URL, dataDir: URL, claudeLog: URL? = nil) {
         self.sessionsRoot = sessionsRoot
         self.claudeConfig = claudeConfig
         self.projectsRoot = projectsRoot
         self.dataDir = dataDir
+        self.claudeLog = claudeLog ?? HelperPaths.home.appendingPathComponent("Library/Logs/Claude/main.log")
     }
 
     /// ~/Library/Application Support/Claude (holds config.json and the Cookies database)
@@ -51,7 +54,8 @@ public struct HelperPaths: Sendable {
             claudeConfig: url("CLAUDE_HELPER_CLAUDE_DIR", home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true))
                 .appendingPathComponent("config.json"),
             projectsRoot: url("CLAUDE_HELPER_PROJECTS_ROOT", home.appendingPathComponent(".claude/projects", isDirectory: true)),
-            dataDir: url("CLAUDE_HELPER_DATA_DIR", home.appendingPathComponent("Library/Application Support/ClaudeHelper", isDirectory: true))
+            dataDir: url("CLAUDE_HELPER_DATA_DIR", home.appendingPathComponent("Library/Application Support/ClaudeHelper", isDirectory: true)),
+            claudeLog: env["CLAUDE_HELPER_CLAUDE_LOG"].map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
         )
     }
 

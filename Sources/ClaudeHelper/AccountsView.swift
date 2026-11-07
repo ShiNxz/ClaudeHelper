@@ -11,7 +11,7 @@ struct AccountsView: View {
         @Bindable var model = model
         Form {
             Section {
-                Text("Save the account Claude is signed in to now, then use Add Another Account to log in to the next one and save it too. After that you can switch between saved accounts from the menu bar without logging in again. Don't use Log out inside Claude for this: logging out can end that login on the server.")
+                Text("Save the account Claude is signed in to now, then use Add Another Account to log in to the next one and save it too. After that, switch between them from the menu bar without logging in again. The signed-in account's saved copy refreshes by itself every few minutes.\n\nTwo things end a saved login: Log out inside Claude, and signing in to that account again by hand. Use Switch and Add Another Account instead. If a saved login stops working, the helper switches you back and marks it, and Log In Again fixes it.")
                     .foregroundStyle(.secondary)
             }
             Section("Signed in now") {
@@ -46,6 +46,7 @@ struct AccountsView: View {
                 ForEach(model.profiles) { p in
                     ProfileRow(profile: p, email: model.email(forAccount: p.accountId), active: p.id == model.activeProfile?.id,
                                onSwitch: { model.confirmAndSwitch(p) },
+                               onLogInAgain: { model.confirmAndLogInAgain(p) },
                                onRename: { renaming = p; renameText = p.name },
                                onDelete: { model.deleteProfile(p) })
                 }
@@ -98,6 +99,7 @@ struct ProfileRow: View {
     let email: String?
     let active: Bool
     let onSwitch: () -> Void
+    let onLogInAgain: () -> Void
     let onRename: () -> Void
     let onDelete: () -> Void
 
@@ -124,12 +126,21 @@ struct ProfileRow: View {
                     if active { Text("signed in").font(.caption).foregroundStyle(.green) }
                 }
                 Text(detailText)
-                    .font(.caption).foregroundStyle(profile.isExpired ? .orange : .secondary)
+                    .font(.caption).foregroundStyle(.secondary)
+                if let problem = profile.problem {
+                    Text(problem).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                } else if profile.isExpired {
+                    Text("This saved login expired. Use Log In Again.").font(.caption).foregroundStyle(.orange)
+                }
             }
             Spacer()
             Button("Rename", action: onRename)
             Button("Delete", action: onDelete)
-            Button("Switch", action: onSwitch).disabled(active || profile.isExpired)
+            if profile.needsLogin && !active {
+                Button("Log In Again", action: onLogInAgain)
+            } else {
+                Button("Switch", action: onSwitch).disabled(active)
+            }
         }
     }
 }

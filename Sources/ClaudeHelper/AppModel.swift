@@ -107,7 +107,39 @@ final class AppModel {
         timer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.startIndexing() }
         }
+        // The --snapshot self-check only looks; it must not save logins.
+        if SelfCheck.outputDir == nil {
+            maintainProfiles()
+            profileTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.maintainProfiles() }
+            }
+        }
     }
+
+    private var profileTimer: Timer?
+
+    /// Keep the signed-in account's saved login current and flag saved logins that stopped working.
+    /// Runs off the main thread; skipped while a switch is in progress.
+    func maintainProfiles() {
+        guard !switching, !profiles.isEmpty else { return }
+        let paths = self.paths
+        DispatchQueue.global(qos: .utility).async {
+            let refreshed = LoginProfiles.refreshActive(paths: paths)
+            LoginProfiles.updateProblems(paths: paths)
+            let list = LoginProfiles.list(paths: paths)
+            onMainQueue {
+                if self.switching { return }
+                self.profiles = list
+                if let r = refreshed, self.awaitingLogin == r.accountId || self.awaitingLogin == r.id {
+                    self.awaitingLogin = nil
+                    self.banner = "Saved the new login for \(r.name). Switching to it works again."
+                }
+            }
+        }
+    }
+
+    /// Profile (or account) the user was asked to log in to again; cleared once that login is saved.
+    var awaitingLogin: String?
 
     private func saveSettings() {
         UserDefaults.standard.set(indexSettings.includeToolOutput, forKey: "index.tools")
@@ -199,6 +231,21 @@ final class AppModel {
     }
 
     // MARK: Sync and backups
+
+    /// The folder an account actually uses: the live folder with the most recent chat activity.
+    func mainFolderId(forAccount id: String) -> String? {
+        let candidates = (snapshot?.folders ?? []).filter { $0.folder.accountId == id && !$0.folder.isBackupCopy && !$0.sessions.isEmpty }
+        return candidates.max { a, b in
+            let la = a.sessions.compactMap(\.lastActivityAt).max() ?? .distantPast
+            let lb = b.sessions.compactMap(\.lastActivityAt).max() ?? .distantPast
+            return la != lb ? la < lb : a.sessions.count < b.sessions.count
+        }?.folder.id
+    }
+
+    func pickMainFolders() {
+        let accounts = Set((snapshot?.folders ?? []).map(\.folder.accountId))
+        syncSelection = Set(accounts.compactMap { mainFolderId(forAccount: $0) })
+    }
 
     func previewSync(folderIds: [String]? = nil) {
         let chosen = folderIds.map(Set.init) ?? syncSelection
@@ -305,6 +352,7 @@ final class AppModel {
     /// Ask first: switching quits Claude, which stops running Code sessions.
     func confirmAndSwitch(_ p: LoginProfile) {
         guard !switching else { return }
+        if p.needsLogin { confirmAndLogInAgain(p); return }
         let alert = NSAlert()
         alert.messageText = "Switch Claude to \(p.name)?"
         var info = "Claude will quit, which stops any running Code sessions, then reopen signed in as \(p.name). The current login is saved first and backed up."
@@ -344,6 +392,36 @@ final class AppModel {
         }
     }
 
+    /// For a saved login that stopped working: reopen Claude signed out (without logging anything out)
+    /// so the user can log in to that account; the helper saves it by itself once they are in.
+    func confirmAndLogInAgain(_ p: LoginProfile) {
+        guard !switching else { return }
+        let who = email(forAccount: p.accountId) ?? p.name
+        let alert = NSAlert()
+        alert.messageText = "Log in to \(who) again?"
+        alert.informativeText = "The current login is saved first. Claude quits, which stops any running Code sessions, and reopens signed out. Log in to \(who) there. The helper saves the new login by itself within a minute, and switching to it works again."
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        awaitingLogin = p.accountId ?? p.id
+        switching = true
+        switchSteps = []
+        let paths = self.paths
+        Task { @MainActor in
+            do {
+                _ = try await LoginProfiles.prepareFreshLogin(paths: paths) { step in
+                    onMainQueue { self.switchSteps.append(step) }
+                }
+                self.banner = "Claude is signed out. Log in to \(who) there. The helper saves it by itself once you are in."
+            } catch {
+                self.banner = error.localizedDescription
+            }
+            self.switching = false
+            self.refresh()
+        }
+    }
+
     func switchTo(_ p: LoginProfile) {
         switching = true
         switchSteps = []
@@ -367,7 +445,7 @@ final class AppModel {
             self.banner = message
             if !warnings.isEmpty {
                 let alert = NSAlert()
-                alert.messageText = "Switching to \(p.name) needs attention"
+                alert.messageText = "Could not switch to \(p.name)"
                 alert.informativeText = warnings.joined(separator: "\n\n")
                 NSApp.activate(ignoringOtherApps: true)
                 alert.runModal()

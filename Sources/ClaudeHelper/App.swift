@@ -40,7 +40,11 @@ struct MenuContent: View {
                 Button {
                     model.confirmAndSwitch(p)
                 } label: {
-                    if p.id == model.activeProfile?.id { Text("\u{2713} " + p.name) } else { Text("     " + p.name) }
+                    if p.id == model.activeProfile?.id {
+                        Text("\u{2713} " + p.name)
+                    } else {
+                        Text("     " + p.name + (p.needsLogin ? " (log in again)" : ""))
+                    }
                 }
                 .disabled(p.id == model.activeProfile?.id)
             }

@@ -54,7 +54,8 @@ enum SelfTest {
         let paths = HelperPaths(sessionsRoot: base.appendingPathComponent("sessions"),
                                 claudeConfig: base.appendingPathComponent("config.json"),
                                 projectsRoot: base.appendingPathComponent("projects"),
-                                dataDir: base.appendingPathComponent("data"))
+                                dataDir: base.appendingPathComponent("data"),
+                                claudeLog: base.appendingPathComponent("main.log"))
         check(!paths.isLiveSessionsRoot, "fixture root is not the live folder")
 
         // JSON patcher
@@ -270,6 +271,85 @@ enum SelfTest {
         expired.sessionExpires = Date().addingTimeInterval(-3600)
         var message = ""
         do { _ = try await LoginProfiles.switchTo(expired, syncFolderIds: nil, paths: paths, step: { _ in }) } catch { message = error.localizedDescription }
-        check(message.contains("expired") && message.contains("save it again"), "switch: expired login refused with a clear message")
+        check(message.contains("expired") && message.contains("Log In Again"), "switch: expired login refused with a clear message")
+
+        try await logTests(paths)
+    }
+
+    static func logLine(_ date: Date, _ text: String) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f.string(from: date) + " [info] [account] " + text + "\n"
+    }
+
+    static func appendLog(_ paths: HelperPaths, _ text: String) throws {
+        if !fm.fileExists(atPath: paths.claudeLog.path) { try write("", paths.claudeLog) }
+        let h = try FileHandle(forWritingTo: paths.claudeLog)
+        try h.seekToEnd()
+        try h.write(contentsOf: Data(text.utf8))
+        try h.close()
+    }
+
+    /// Sign-in and sign-out handling, driven by fake lines in Claude's log format.
+    static func logTests(_ paths: HelperPaths) async throws {
+        let now = Date()
+        try write(logLine(now.addingTimeInterval(-300), "Login-state transition (loggedOut: false \u{2192} true, uuid: aaaaaaaa-0000-0000-0000-000000000001 \u{2192} <none>), clearing oauth cache")
+                  + logLine(now.addingTimeInterval(-290), "Navigated to /logout, synthesizing logged-out")
+                  + logLine(now.addingTimeInterval(-280), "Login-state transition (loggedOut: true \u{2192} false, uuid: aaaaaaaa-0000-0000-0000-000000000001 \u{2192} bbbbbbbb-0000-0000-0000-000000000002)")
+                  + "2026-01-01 00:00:00 [info] [oauth-v2] unrelated line\n", paths.claudeLog)
+        let events = ClaudeLog.loginEvents(paths: paths)
+        check(events.count == 3 && events[0].kind == .signedOut(from: "aaaaaaaa-0000-0000-0000-000000000001")
+              && events[1].kind == .signedOut(from: nil)
+              && events[2].kind == .signedIn(account: "bbbbbbbb-0000-0000-0000-000000000002", wasSignedOut: true), "log: sign-in and sign-out lines parsed")
+
+        // Two accounts saved while signed in (the last log event is a sign-in).
+        let xId = "aaaaaaaa-0000-0000-0000-00000000000a", yId = "bbbbbbbb-0000-0000-0000-00000000000b"
+        try fakeLogin(paths, account: xId, token: "X", marker: "marker-x")
+        let x = try LoginProfiles.saveCurrent(name: "X", paths: paths)
+        try fakeLogin(paths, account: yId, token: "Y", marker: "marker-y")
+        let y = try LoginProfiles.saveCurrent(name: "Y", paths: paths)
+
+        // Signed out of Y inside Claude: saving must refuse, and Y is flagged.
+        try appendLog(paths, logLine(Date().addingTimeInterval(2), "Login-state transition (loggedOut: false \u{2192} true, uuid: \(yId) \u{2192} <none>), clearing oauth cache"))
+        check(!LoginProfiles.isSignedIn(paths: paths), "log: signed-out state detected")
+        var refused = false
+        do { _ = try LoginProfiles.saveCurrent(name: "Y", paths: paths) } catch { refused = true }
+        check(refused, "save: refuses to save while Claude is signed out")
+        LoginProfiles.updateProblems(paths: paths)
+        check(LoginProfiles.list(paths: paths).first { $0.id == y.id }?.problem?.contains("Signed out") == true, "profiles: login ended by a sign-out is flagged")
+        check(LoginProfiles.list(paths: paths).first { $0.id == x.id }?.problem == nil, "profiles: other logins not flagged")
+        var switchRefused = ""
+        do { _ = try await LoginProfiles.switchTo(LoginProfiles.list(paths: paths).first { $0.id == y.id }!, syncFolderIds: nil, paths: paths, step: { _ in }) } catch { switchRefused = error.localizedDescription }
+        check(switchRefused.contains("Log In Again"), "switch: a flagged login is not used")
+
+        // Back on X (signed in), switch to a copy of Y that Claude rejects: X must be put back and Y flagged.
+        try fakeLogin(paths, account: xId, token: "X", marker: "marker-x")
+        try appendLog(paths, logLine(Date().addingTimeInterval(3), "Login-state transition (loggedOut: true \u{2192} false, uuid: <none> \u{2192} \(xId))"))
+        var yClean = LoginProfiles.list(paths: paths).first { $0.id == y.id }!
+        yClean.problem = nil
+        LoginProfiles.saveMeta(yClean, paths: paths)
+        let r = try await LoginProfiles.switchTo(yClean, syncFolderIds: nil, paths: paths, verifier: { _ in .rejected }, step: { _ in })
+        let after = try JSONSerialization.jsonObject(with: Data(contentsOf: paths.claudeConfig)) as! [String: Any]
+        check(after["lastKnownAccountUuid"] as? String == xId && (after["oauth:tokenCacheV2"] as? String) == "v2-X",
+              "switch: rejected login rolls back to the previous account")
+        check(r.warnings.first?.contains("back on X") == true, "switch: rollback is explained")
+        check(LoginProfiles.list(paths: paths).first { $0.id == y.id }?.problem != nil, "switch: rejected login is flagged")
+
+        // An accepted switch: Y is used and X stays good.
+        var yAgain = LoginProfiles.list(paths: paths).first { $0.id == y.id }!
+        yAgain.problem = nil
+        LoginProfiles.saveMeta(yAgain, paths: paths)
+        let ok = try await LoginProfiles.switchTo(yAgain, syncFolderIds: nil, paths: paths, verifier: { _ in .accepted }, step: { _ in })
+        check(ok.warnings.isEmpty && LoginProfiles.currentAccountId(paths: paths) == yId, "switch: accepted login stays in place")
+
+        // Self-refresh: the signed-in account's copy is re-saved and its flag cleared.
+        var yMeta = LoginProfiles.list(paths: paths).first { $0.id == y.id }!
+        yMeta.problem = "stale"
+        LoginProfiles.saveMeta(yMeta, paths: paths)
+        try appendLog(paths, logLine(Date().addingTimeInterval(-60), "Login-state transition (loggedOut: true \u{2192} false, uuid: <none> \u{2192} \(yId))"))
+        _ = x
+        check(LoginProfiles.refreshActive(paths: paths)?.id == y.id
+              && LoginProfiles.list(paths: paths).first { $0.id == y.id }?.problem == nil, "refresh: signed-in account re-saved and unflagged")
     }
 }

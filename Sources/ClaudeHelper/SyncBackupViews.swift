@@ -4,52 +4,48 @@ import SwiftUI
 
 struct SyncView: View {
     @Environment(AppModel.self) private var model
+    @State private var showAll = false
+
+    /// Folders grouped by account, in display order.
+    var groups: [(account: String, folders: [FolderScan])] {
+        let all = model.snapshot?.folders ?? []
+        var order: [String] = []
+        var map: [String: [FolderScan]] = [:]
+        for f in all {
+            if map[f.folder.accountId] == nil { order.append(f.folder.accountId) }
+            map[f.folder.accountId, default: []].append(f)
+        }
+        return order.map { ($0, map[$0]!) }
+    }
 
     var body: some View {
-        @Bindable var model = model
         Form {
             Section {
-                Text("Pick the account folders that should hold the same chats. For every chat, the copy with the newest file wins and is written to all picked folders. Chats deleted in one folder are moved out of the others into the backup, never brought back. Each folder's archived list is rebuilt to match. You see every change before anything is written.")
+                Text("Claude keeps a separate chat list for every account, and inside an account for every organization. To give several accounts the same chats, pick one folder per account: the one that holds that account's chats (marked main). Pick Main Folders does that for all accounts, untick any you want to leave out.")
                     .foregroundStyle(.secondary)
+                Text("Sync then copies every chat to all picked folders. The newest copy of a chat wins, deleted chats stay deleted, and you see every change before anything is written. Turn on Sync chats in Accounts to repeat this on every account switch.")
+                    .foregroundStyle(.secondary)
+                Toggle("Show empty folders and backup copies", isOn: $showAll)
             }
-            Section("Account folders") {
-                ForEach(model.snapshot?.folders ?? []) { f in
-                    HStack(alignment: .firstTextBaseline) {
-                        Toggle(isOn: Binding(
-                            get: { model.syncSelection.contains(f.folder.id) },
-                            set: { on in
-                                if on { model.syncSelection.insert(f.folder.id) } else { model.syncSelection.remove(f.folder.id) }
-                            })) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(model.label(f.folder))
-                                Text(f.folder.id).font(.caption).foregroundStyle(.tertiary).textSelection(.enabled)
-                                let s = f.sessions
-                                Text("\(s.count) chats, \(s.filter(\.isArchived).count) archived, \(s.filter(\.isStarred).count) pinned, \(f.deletedMarkers.count) deleted markers")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                if let p = f.archivedIndex.problem {
-                                    Text("archived-sessions.idx: " + p).font(.caption).foregroundStyle(.red)
-                                }
-                                if f.folder.isBackupCopy {
-                                    Text("Hand-made backup copy, usually leave it out.").font(.caption).foregroundStyle(.orange)
-                                }
-                            }
+            ForEach(groups, id: \.account) { g in
+                let visible = g.folders.filter { showAll || (!$0.folder.isBackupCopy && (!$0.sessions.isEmpty || !$0.deletedMarkers.isEmpty)) }
+                if !visible.isEmpty {
+                    Section {
+                        ForEach(visible) { f in SyncFolderRow(scan: f, isMain: model.mainFolderId(forAccount: g.account) == f.folder.id) }
+                    } header: {
+                        HStack {
+                            Text(model.email(forAccount: g.account) ?? "Account " + String(g.account.prefix(8)))
+                            if g.account == model.snapshot?.activeAccountId { Text("signed in").foregroundStyle(.green) }
                         }
-                        .toggleStyle(.checkbox)
-                        Spacer()
-                        TextField("", text: Binding(
-                            get: { model.nicknames[f.folder.id] ?? "" },
-                            set: { model.nicknames[f.folder.id] = $0.isEmpty ? nil : $0 }), prompt: Text("Nickname"))
-                            .labelsHidden()
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 160)
                     }
-                    .padding(.vertical, 2)
                 }
             }
             Section {
                 HStack {
                     Text("\(model.syncSelection.count) folders picked").foregroundStyle(.secondary)
                     Spacer()
+                    Button("Clear") { model.syncSelection = [] }.disabled(model.syncSelection.isEmpty)
+                    Button("Pick Main Folders") { model.pickMainFolders() }
                     Button("Preview Sync...") { model.previewSync() }
                         .disabled(model.syncSelection.count < 2)
                         .keyboardShortcut(.defaultAction)
@@ -57,6 +53,49 @@ struct SyncView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+struct SyncFolderRow: View {
+    @Environment(AppModel.self) private var model
+    let scan: FolderScan
+    let isMain: Bool
+
+    var countsText: String {
+        let s = scan.sessions
+        return "\(s.count) chats, \(s.filter(\.isArchived).count) archived, \(s.filter(\.isStarred).count) pinned, \(scan.deletedMarkers.count) deleted markers"
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Toggle(isOn: Binding(
+                get: { model.syncSelection.contains(scan.folder.id) },
+                set: { on in
+                    if on { model.syncSelection.insert(scan.folder.id) } else { model.syncSelection.remove(scan.folder.id) }
+                })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(model.nicknames[scan.folder.id].flatMap { $0.isEmpty ? nil : $0 } ?? "Org " + String(scan.folder.orgId.prefix(8)))
+                        if isMain { Text("main").font(.caption).foregroundStyle(.green) }
+                        if scan.folder.isBackupCopy { Text("backup copy").font(.caption).foregroundStyle(.orange) }
+                    }
+                    Text(countsText).font(.caption).foregroundStyle(.secondary)
+                    Text(scan.folder.id).font(.caption2).foregroundStyle(.tertiary).textSelection(.enabled)
+                    if let p = scan.archivedIndex.problem {
+                        Text("archived-sessions.idx: " + p).font(.caption).foregroundStyle(.red)
+                    }
+                }
+            }
+            .toggleStyle(.checkbox)
+            Spacer()
+            TextField("", text: Binding(
+                get: { model.nicknames[scan.folder.id] ?? "" },
+                set: { model.nicknames[scan.folder.id] = $0.isEmpty ? nil : $0 }), prompt: Text("Nickname"))
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 150)
+        }
+        .padding(.vertical, 2)
     }
 }
 

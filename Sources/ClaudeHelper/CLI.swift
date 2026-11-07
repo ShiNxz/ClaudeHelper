@@ -36,6 +36,27 @@ enum CLI {
         do {
             switch cmd {
             case "selftest": return await SelfTest.run()
+            case "profiles":
+                // Read-only: what the app would conclude about each saved login.
+                let events = ClaudeLog.loginEvents(paths: paths)
+                out("Claude signed in now: \(LoginProfiles.isSignedIn(paths: paths)), account \(String((paths.activeAccountId() ?? "-").prefix(8)))")
+                for p in LoginProfiles.list(paths: paths) {
+                    let endedBy = events.first { e in
+                        guard e.date > p.savedAt.addingTimeInterval(1), case .signedOut(let from) = e.kind else { return false }
+                        return from == p.accountId
+                    }
+                    let state = p.problem ?? (endedBy.map { "would be flagged: signed out at " + $0.date.formatted(date: .omitted, time: .standard) } ?? "looks fine")
+                    out("\(p.name)  account \(String((p.accountId ?? "-").prefix(8)))  saved \(p.savedAt.formatted(date: .omitted, time: .standard))  \(state)"
+                        + (p.accountId == paths.activeAccountId() ? "  (signed in now, the app re-saves it)" : ""))
+                }
+            case "login-events":
+                for e in ClaudeLog.loginEvents(paths: paths) {
+                    let when = e.date.formatted(date: .numeric, time: .standard)
+                    switch e.kind {
+                    case .signedOut(let from): out(when + "  signed out" + (from.map { " of " + String($0.prefix(8)) } ?? ""))
+                    case .signedIn(let a, let fresh): out(when + "  signed in to " + String(a.prefix(8)) + (fresh ? " (new sign-in)" : ""))
+                    }
+                }
             case "accounts":
                 let emails = TranscriptIndex.accountEmails(paths: paths)
                 let active = paths.activeAccountId()
