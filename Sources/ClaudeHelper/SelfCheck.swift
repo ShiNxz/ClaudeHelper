@@ -16,6 +16,7 @@ enum SelfCheck {
     @MainActor
     static func run(model: AppModel, dir: URL) async {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        saveMenuBarIcon(dir.appendingPathComponent("menubar-icon.png"))
         try? await Task.sleep(nanoseconds: 2_000_000_000)
         for section in AppSection.allCases {
             model.section = section
@@ -45,6 +46,29 @@ enum SelfCheck {
         }
         try? await Task.sleep(nanoseconds: 500_000_000)
         NSApp.terminate(nil)
+    }
+
+    /// The template icon drawn 8x on a light and a dark strip, like the two menu bar styles.
+    @MainActor
+    static func saveMenuBarIcon(_ url: URL) {
+        let scale: CGFloat = 8, side: CGFloat = 18 * scale
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(side * 2), pixelsHigh: Int(side), bitsPerSample: 8,
+                                   samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        for (i, (bg, fg)) in [(NSColor(white: 0.93, alpha: 1), NSColor.black), (NSColor(white: 0.15, alpha: 1), NSColor.white)].enumerated() {
+            let r = NSRect(x: CGFloat(i) * side, y: 0, width: side, height: side)
+            bg.setFill(); r.fill()
+            let tinted = NSImage(size: r.size, flipped: false) { rect in
+                MenuBarIcon.image.draw(in: rect)
+                fg.set()
+                rect.fill(using: .sourceAtop)
+                return true
+            }
+            tinted.draw(in: r)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        try? rep.representation(using: .png, properties: [:])?.write(to: url)
     }
 
     @MainActor

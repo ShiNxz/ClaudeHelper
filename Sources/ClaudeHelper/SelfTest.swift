@@ -150,7 +150,9 @@ enum SelfTest {
         // Search index
         let transcript = paths.projectsRoot.appendingPathComponent("-tmp-project/c1.jsonl")
         let lines = [
+            #"{"type":"session-owner","accountUuid":"11111111-2222-3333-4444-555555555555","organizationUuid":"org","sessionId":"c1"}"#,
             #"{"type":"custom-title","customTitle":"Fixture chat","sessionId":"c1"}"#,
+            ##"{"parentUuid":null,"isSidechain":false,"type":"user","isMeta":true,"message":{"role":"user","content":"# userEmail\nThe user's email address is someone.test@example.com. Use it only to identify the user."},"uuid":"m0","timestamp":"2026-01-01T09:59:00.000Z"}"##,
             #"{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"please fix the zebracorn parser"},"uuid":"u1","timestamp":"2026-01-01T10:00:00.000Z","cwd":"/tmp/project"}"#,
             #"{"parentUuid":"u1","isSidechain":false,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"secret thoughts quokka"}]},"type":"assistant","uuid":"a0","timestamp":"2026-01-01T10:00:01.000Z"}"#,
             #"{"parentUuid":"u1","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Fixed the parser <system-reminder>hidden wombat</system-reminder> done"}]},"type":"assistant","uuid":"a1","timestamp":"2026-01-01T10:00:02.000Z"}"#,
@@ -167,6 +169,8 @@ enum SelfTest {
         check(try hits("wombat") == 0, "index: system reminders stripped")
         check(try hits("platypus") == 0, "index: tool output off by default")
         check((try TranscriptIndex.search(paths: paths, query: "zebracorn")).first?.file.title == "Fixture chat", "index: custom title picked up")
+        check(TranscriptIndex.accountEmails(paths: paths) == ["11111111-2222-3333-4444-555555555555": "someone.test@example.com"], "index: account id linked to its email")
+        check(try hits("someone") == 0, "index: meta context lines not indexed as messages")
         let fh = try FileHandle(forWritingTo: transcript)
         try fh.seekToEnd()
         try fh.write(contentsOf: Data((#"{"parentUuid":"u2","isSidechain":false,"type":"user","message":{"role":"user","content":"appended narwhal line"},"uuid":"u3","timestamp":"2026-01-01T10:01:00.000Z"}"# + "\n").utf8))

@@ -18,19 +18,22 @@ struct AccountsView: View {
                 HStack {
                     if let id = model.snapshot?.activeAccountId {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(model.activeProfile?.name ?? "Not saved yet")
-                            Text("Account " + String(id.prefix(8))).font(.caption).foregroundStyle(.secondary)
+                            Text(model.email(forAccount: id) ?? "Account " + String(id.prefix(8)))
+                            Text(model.activeProfile.map { "Saved as " + $0.name } ?? "Not saved yet")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     } else {
                         Text("Claude does not look signed in.").foregroundStyle(.secondary)
                     }
                     Spacer()
-                    TextField("", text: $newName, prompt: Text(model.activeProfile?.name ?? "Name, e.g. Work"))
+                    TextField("", text: $newName, prompt: Text(model.activeProfile?.name ?? model.email(forAccount: model.snapshot?.activeAccountId) ?? "Name, e.g. Work"))
                         .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 180)
                     Button(model.activeProfile == nil ? "Save This Login" : "Save Again") {
-                        model.saveCurrentLogin(name: newName.isEmpty ? (model.activeProfile?.name ?? "") : newName)
+                        model.saveCurrentLogin(name: newName.isEmpty
+                            ? (model.activeProfile?.name ?? model.email(forAccount: model.snapshot?.activeAccountId) ?? "")
+                            : newName)
                         newName = ""
                     }
                     .disabled(model.snapshot?.activeAccountId == nil || model.switching)
@@ -41,7 +44,7 @@ struct AccountsView: View {
                     Text("No saved accounts yet.").foregroundStyle(.secondary)
                 }
                 ForEach(model.profiles) { p in
-                    ProfileRow(profile: p, active: p.id == model.activeProfile?.id,
+                    ProfileRow(profile: p, email: model.email(forAccount: p.accountId), active: p.id == model.activeProfile?.id,
                                onSwitch: { model.confirmAndSwitch(p) },
                                onRename: { renaming = p; renameText = p.name },
                                onDelete: { model.deleteProfile(p) })
@@ -92,10 +95,21 @@ struct AccountsView: View {
 
 struct ProfileRow: View {
     let profile: LoginProfile
+    let email: String?
     let active: Bool
     let onSwitch: () -> Void
     let onRename: () -> Void
     let onDelete: () -> Void
+
+    var detailText: String {
+        var who = ""
+        if let email {
+            if email != profile.name { who = email + ", " }
+        } else {
+            who = "Account " + String((profile.accountId ?? "unknown").prefix(8)) + ", "
+        }
+        return who + "saved " + profile.savedAt.formatted(date: .abbreviated, time: .shortened) + ", " + expiryText
+    }
 
     var expiryText: String {
         guard let e = profile.sessionExpires else { return "login expiry unknown" }
@@ -109,7 +123,7 @@ struct ProfileRow: View {
                     Text(profile.name)
                     if active { Text("signed in").font(.caption).foregroundStyle(.green) }
                 }
-                Text("Account " + String((profile.accountId ?? "unknown").prefix(8)) + ", saved " + profile.savedAt.formatted(date: .abbreviated, time: .shortened) + ", " + expiryText)
+                Text(detailText)
                     .font(.caption).foregroundStyle(profile.isExpired ? .orange : .secondary)
             }
             Spacer()

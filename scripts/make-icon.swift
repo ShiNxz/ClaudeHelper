@@ -1,4 +1,4 @@
-// Renders Resources/AppIcon.icns from plain shapes (no SF Symbols, no third-party marks).
+// Renders Resources/AppIcon.icns from plain shapes (no SF Symbols, no third-party logos).
 // Run: swift scripts/make-icon.swift [output.icns]
 import AppKit
 
@@ -22,23 +22,35 @@ func bubble(_ rect: NSRect, radius: CGFloat, tailLeft: Bool) {
     tail.fill()
 }
 
+/// Four-point sparkle with curved sides.
+func sparkle(center c: NSPoint, radius r: CGFloat, pinch: CGFloat = 0.18) -> NSBezierPath {
+    let p = NSBezierPath()
+    let tips = [NSPoint(x: c.x, y: c.y + r), NSPoint(x: c.x + r, y: c.y), NSPoint(x: c.x, y: c.y - r), NSPoint(x: c.x - r, y: c.y)]
+    let k = r * pinch
+    let controls = [NSPoint(x: c.x + k, y: c.y + k), NSPoint(x: c.x + k, y: c.y - k), NSPoint(x: c.x - k, y: c.y - k), NSPoint(x: c.x - k, y: c.y + k)]
+    p.move(to: tips[0])
+    for i in 0..<4 {
+        p.curve(to: tips[(i + 1) % 4], controlPoint1: controls[i], controlPoint2: controls[i])
+    }
+    p.close()
+    return p
+}
+
+// Warm terracotta and cream, in the spirit of the Claude app, with an original mark (not Anthropic's logo).
+let terracotta = NSColor(red: 0.851, green: 0.467, blue: 0.341, alpha: 1)
+let cream = NSColor(red: 0.980, green: 0.961, blue: 0.918, alpha: 1)
+
 let image = NSImage(size: NSSize(width: size, height: size))
 image.lockFocus()
 let bg = NSBezierPath(roundedRect: NSRect(x: 100, y: 100, width: 824, height: 824), xRadius: 185, yRadius: 185)
-NSGradient(starting: NSColor(red: 0.27, green: 0.47, blue: 0.96, alpha: 1),
-           ending: NSColor(red: 0.14, green: 0.22, blue: 0.55, alpha: 1))!.draw(in: bg, angle: -90)
+NSGradient(starting: NSColor(red: 0.875, green: 0.500, blue: 0.370, alpha: 1),
+           ending: NSColor(red: 0.760, green: 0.380, blue: 0.255, alpha: 1))!.draw(in: bg, angle: -90)
 
-NSColor(white: 1, alpha: 0.45).setFill()
-bubble(NSRect(x: 215, y: 455, width: 430, height: 300), radius: 80, tailLeft: true)
+cream.setFill()
+bubble(NSRect(x: 235, y: 330, width: 554, height: 420), radius: 125, tailLeft: true)
 
-NSColor.white.setFill()
-bubble(NSRect(x: 375, y: 295, width: 440, height: 310), radius: 85, tailLeft: false)
-
-NSColor(red: 0.20, green: 0.33, blue: 0.80, alpha: 1).setFill()
-for i in 0..<3 {
-    let cx = 485 + CGFloat(i) * 110
-    NSBezierPath(ovalIn: NSRect(x: cx - 30, y: 420, width: 60, height: 60)).fill()
-}
+terracotta.setFill()
+sparkle(center: NSPoint(x: 512, y: 540), radius: 150).fill()
 image.unlockFocus()
 
 let fm = FileManager.default

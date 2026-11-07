@@ -9,6 +9,7 @@ It works with Claude's undocumented local files. A Claude update can change them
 ## Features
 
 - **Switch accounts without logging in again.** Save the login of each account once, then switch Claude between them from the menu bar. The helper quits Claude, saves the current login (so refreshed tokens are kept), optionally syncs chats between the accounts, puts the chosen login in place and reopens Claude.
+- **Accounts by email.** Account folders are labeled with the email of each account, learned from your own transcripts, so you can tell the ids apart.
 - **Sessions browser.** One table of every Code session in every account folder: title, project, account folder, archived, pinned, last activity. Filter, sort, double-click to open the chat in Claude. Read-only, works while Claude is running.
 - **Search old chats.** Full-text search over your transcripts in `~/.claude/projects`, with a local SQLite index that updates incrementally in the background. A result opens the chat in Claude, or, for chats with no sidebar entry, copies the `claude --resume` command.
 - **Restore archived chats** back into the sidebar.
@@ -67,7 +68,7 @@ ClaudeHelper --cli backup         # back up all account folders now
 - **No network.** Claude Helper makes no network requests and has no analytics or telemetry. Everything stays on your Mac. Opening a chat hands a `claude://` link to the Claude app, which is the only thing that leaves the helper.
 - **What it reads:**
   - `~/Library/Application Support/Claude/claude-code-sessions/` (sidebar entries),
-  - `~/.claude/projects/` (transcripts, never modified),
+  - `~/.claude/projects/` (transcripts, never modified). Besides chat text, the indexer notes which account each transcript belongs to and the email Claude recorded for it, so account folders can be labeled with emails instead of ids,
   - `lastKnownAccountUuid` from `~/Library/Application Support/Claude/config.json`, to show which account is signed in,
   - only when you save or switch accounts: the login keys in that `config.json` (`oauth:tokenCache`, `oauth:tokenCacheV2`) and Claude's `Cookies` database. These are already encrypted by Claude with its own key from the macOS Keychain. The helper copies them as they are. It never decrypts them, never reads the Keychain, and never shows, logs or sends them. From the cookie database it reads only cookie names and expiry dates, to tell you when a saved login expires.
 - **What it writes** is listed in the next section. Its own data lives in `~/Library/Application Support/ClaudeHelper/` (search index, backups, saved logins), readable only by your user. Delete that folder to remove everything it stored. Saved logins only work on the Mac they were saved on.
@@ -153,6 +154,8 @@ With those set, the DMG is notarized with `notarytool` and stapled, and the Open
 - **Large connector config.** A chat file with a very large `remoteMcpServersConfig` (over 100 KB) once failed to show in the sidebar after being copied to another account. The sync preview warns about these.
 - **Applying stops running sessions.** Applying a change quits Claude, which stops every running Code session until Claude reopens.
 - **Old transcripts.** Claude Code deletes transcripts after its cleanup period, so search only covers what is still on disk.
+- **Emails** are only known for accounts that have at least one Code transcript on this Mac from a recent Claude version. Others show their account id until you give them a nickname.
+- **Icon.** The icon and menu bar icon are original artwork in warm colors. They are not Anthropic's logo.
 - **Process name.** Claude's own background processes are also called "Claude Helper" in Activity Monitor. This app's process is `ClaudeHelper` (no space), bundle id `io.github.shinxz.ClaudeHelper`.
 - **Format changes.** If Claude changes its file formats, the schema guard should block writes. Reading may show odd values until the helper is updated.
 

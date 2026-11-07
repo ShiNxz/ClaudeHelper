@@ -17,6 +17,7 @@ enum CLI {
             usage: ClaudeHelper --cli <command>
               selftest                             run the built-in tests against temp fixtures
               scan                                 list folders and sessions
+              accounts                             account folders with the email each belongs to (from the index)
               roundtrip                            check the JSON patcher on every session file (no writes)
               index [--tools] [--subagents]        update the search index
               search <query> [--role user|assistant|tool]
@@ -35,6 +36,12 @@ enum CLI {
         do {
             switch cmd {
             case "selftest": return await SelfTest.run()
+            case "accounts":
+                let emails = TranscriptIndex.accountEmails(paths: paths)
+                let active = paths.activeAccountId()
+                for f in SessionScanner.listFolders(root: paths.sessionsRoot) {
+                    out(f.id + "  " + (emails[f.accountId] ?? "(email unknown)") + (f.accountId == active ? "  signed in" : ""))
+                }
             case "privacy-check":
                 // Launch through `open` so macOS treats the app as its own process for privacy prompts.
                 var r: [String: Any] = [:]

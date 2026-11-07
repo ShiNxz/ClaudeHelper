@@ -10,7 +10,7 @@ public struct IndexSettings: Equatable, Codable, Sendable {
     }
 
     /// Bump the version when the extraction rules change; a different key forces a full rebuild.
-    var key: String { "v3;tools=\(includeToolOutput);subagents=\(includeSubagents)" }
+    var key: String { "v4;tools=\(includeToolOutput);subagents=\(includeSubagents)" }
 }
 
 public struct IndexProgress: Sendable {
@@ -123,7 +123,8 @@ public final class TranscriptIndex {
             inode INTEGER, size INTEGER, mtime REAL, offset INTEGER,
             cli_session_id TEXT, is_subagent INTEGER, project_dir TEXT,
             cwd TEXT, title TEXT, title_kind INTEGER, first_prompt TEXT,
-            first_ts TEXT, last_ts TEXT, messages INTEGER DEFAULT 0);
+            first_ts TEXT, last_ts TEXT, messages INTEGER DEFAULT 0,
+            account_uuid TEXT, email TEXT);
         CREATE INDEX IF NOT EXISTS files_cli ON files(cli_session_id);
         CREATE VIRTUAL TABLE IF NOT EXISTS messages USING fts5(
             text, role UNINDEXED, file_id UNINDEXED, ts UNINDEXED,
@@ -208,6 +209,8 @@ public final class TranscriptIndex {
         var firstTs: String?
         var lastTs: String?
         var messages: Int
+        var accountUuid: String?
+        var email: String?
     }
 
     // MARK: Update
@@ -227,12 +230,13 @@ public final class TranscriptIndex {
 
         let found = discover()
         var known: [String: FileState] = [:]
-        let q = try db.prepare("SELECT id,path,inode,size,mtime,offset,title_kind,title,cwd,first_prompt,first_ts,last_ts,messages FROM files")
+        let q = try db.prepare("SELECT id,path,inode,size,mtime,offset,title_kind,title,cwd,first_prompt,first_ts,last_ts,messages,account_uuid,email FROM files")
         while try q.step() {
             known[q.text(1) ?? ""] = FileState(
                 id: q.int64(0), inode: q.int64(2), size: q.int64(3), mtime: q.double(4), offset: q.int64(5),
                 titleKind: Int(q.int64(6)), title: q.text(7), cwd: q.text(8), firstPrompt: q.text(9),
-                firstTs: q.text(10), lastTs: q.text(11), messages: Int(q.int64(12)))
+                firstTs: q.text(10), lastTs: q.text(11), messages: Int(q.int64(12)),
+                accountUuid: q.text(13), email: q.text(14))
         }
 
         // Forget files that no longer exist.
@@ -295,7 +299,8 @@ public final class TranscriptIndex {
                 let del = try db.prepare("DELETE FROM messages WHERE file_id=?")
                 del.bind(1, existing.id); try del.run()
                 existing = FileState(id: existing.id, inode: c.inode, size: 0, mtime: 0, offset: 0, titleKind: 0,
-                                     title: nil, cwd: nil, firstPrompt: nil, firstTs: nil, lastTs: nil, messages: 0)
+                                     title: nil, cwd: nil, firstPrompt: nil, firstTs: nil, lastTs: nil, messages: 0,
+                           accountUuid: nil, email: nil)
             }
             st = existing
             st.inode = c.inode
@@ -304,16 +309,18 @@ public final class TranscriptIndex {
             ins.bind(1, c.url.path).bind(2, c.inode).bind(3, c.cliSessionId).bind(4, Int64(c.isSubagent ? 1 : 0)).bind(5, c.projectDir)
             try ins.run()
             st = FileState(id: db.lastInsertRowID, inode: c.inode, size: 0, mtime: 0, offset: 0, titleKind: 0,
-                           title: nil, cwd: nil, firstPrompt: nil, firstTs: nil, lastTs: nil, messages: 0)
+                           title: nil, cwd: nil, firstPrompt: nil, firstTs: nil, lastTs: nil, messages: 0,
+                           accountUuid: nil, email: nil)
         }
 
         let insertMsg = try db.prepare("INSERT INTO messages(text, role, file_id, ts) VALUES(?,?,?,?)")
-        let updateFile = try db.prepare("UPDATE files SET inode=?,size=?,mtime=?,offset=?,title=?,title_kind=?,cwd=?,first_prompt=?,first_ts=?,last_ts=?,messages=? WHERE id=?")
+        let updateFile = try db.prepare("UPDATE files SET inode=?,size=?,mtime=?,offset=?,title=?,title_kind=?,cwd=?,first_prompt=?,first_ts=?,last_ts=?,messages=?,account_uuid=?,email=? WHERE id=?")
         func saveState(finished: Bool) throws {
             // Only record size/mtime once the whole file is consumed, so a partial run resumes from offset.
             updateFile.bind(1, st.inode).bind(2, finished ? c.size : -1).bind(3, finished ? c.mtime : 0).bind(4, st.offset)
             updateFile.bind(5, st.title).bind(6, Int64(st.titleKind)).bind(7, st.cwd).bind(8, st.firstPrompt)
-            updateFile.bind(9, st.firstTs).bind(10, st.lastTs).bind(11, Int64(st.messages)).bind(12, st.id)
+            updateFile.bind(9, st.firstTs).bind(10, st.lastTs).bind(11, Int64(st.messages))
+            updateFile.bind(12, st.accountUuid).bind(13, st.email).bind(14, st.id)
             try updateFile.run()
         }
 
@@ -346,6 +353,7 @@ public final class TranscriptIndex {
                         let end = base.distance(to: UnsafeRawPointer(nl))
                         if end > start {
                             let ptr = UnsafeRawBufferPointer(start: base + start, count: end - start)
+                            extractor.scanIdentity(ptr, into: &st)
                             if extractor.wants(ptr) { lines.append(Data(ptr)) }
                         }
                         start = end + 1
@@ -455,6 +463,18 @@ public final class TranscriptIndex {
         return order.compactMap { groups[$0] }
     }
 
+    /// Account id -> email, from transcripts that carry both a session-owner line and the
+    /// "The user's email address is ..." context line. The most common email per account wins.
+    public static func accountEmails(paths: HelperPaths) -> [String: String] {
+        guard let db = try? SQLiteDB(path: paths.indexDB.path, readOnly: true),
+              let s = try? db.prepare("SELECT account_uuid, email, count(*) AS n FROM files WHERE account_uuid IS NOT NULL AND email IS NOT NULL GROUP BY 1,2 ORDER BY n ASC") else { return [:] }
+        var out: [String: String] = [:]
+        while (try? s.step()) == true {
+            if let a = s.text(0), let e = s.text(1) { out[a] = e }   // ascending, so the most common one is written last
+        }
+        return out
+    }
+
     public static func fullText(paths: HelperPaths, rowid: Int64) -> String? {
         guard let db = try? SQLiteDB(path: paths.indexDB.path, readOnly: true),
               let s = try? db.prepare("SELECT text FROM messages WHERE rowid=?") else { return nil }
@@ -508,6 +528,29 @@ struct LineExtractor {
         return needle.withUnsafeBytes { nb -> Int? in
             guard let r = memmem(base, n, nb.baseAddress!, nb.count) else { return nil }
             return base.distance(to: UnsafeRawPointer(r))
+        }
+    }
+
+    static let ownerPrefix = Array("{\"type\":\"session-owner\",\"accountUuid\":\"".utf8)
+    static let emailMarker = Array("The user's email address is ".utf8)
+    static let emailChars = Set(Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._%+-@".utf8))
+
+    /// Which account a transcript belongs to and that account's email, read straight from the bytes.
+    func scanIdentity(_ p: UnsafeRawBufferPointer, into st: inout TranscriptIndex.FileState) {
+        if st.accountUuid == nil, Self.hasPrefix(p, Self.ownerPrefix) {
+            let start = Self.ownerPrefix.count
+            if start + 36 <= p.count {
+                let id = String(decoding: UnsafeRawBufferPointer(rebasing: p[start..<(start + 36)]), as: UTF8.self)
+                if id.allSatisfy({ $0.isHexDigit || $0 == "-" }) { st.accountUuid = id }
+            }
+        }
+        if st.email == nil, let at = Self.find(p, Self.emailMarker, within: p.count) {
+            var i = at + Self.emailMarker.count
+            var bytes: [UInt8] = []
+            while i < p.count, Self.emailChars.contains(p[i]), bytes.count < 254 { bytes.append(p[i]); i += 1 }
+            while bytes.last == UInt8(ascii: ".") { bytes.removeLast() }
+            let email = String(decoding: bytes, as: UTF8.self)
+            if let atSign = email.firstIndex(of: "@"), email[email.index(after: atSign)...].contains(".") { st.email = email }
         }
     }
 

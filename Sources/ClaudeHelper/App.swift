@@ -16,7 +16,7 @@ struct ClaudeHelperApp: App {
         MenuBarExtra {
             MenuContent().environment(model)
         } label: {
-            Image(systemName: model.indexProgress.isRunning ? "bubble.left.and.text.bubble.right.fill" : "bubble.left.and.text.bubble.right")
+            Image(nsImage: MenuBarIcon.image)
         }
     }
 }

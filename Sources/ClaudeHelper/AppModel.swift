@@ -76,6 +76,9 @@ final class AppModel {
     private var cancelFlag: CancelFlag?
     private var timer: Timer?
 
+    /// Account id -> email, learned from transcripts by the indexer.
+    var accountEmails: [String: String] = [:]
+
     // Login profiles
     var profiles: [LoginProfile] = []
     var switchSteps: [String] = []
@@ -124,8 +127,21 @@ final class AppModel {
         }
     }
 
+    func email(forAccount id: String?) -> String? { id.flatMap { accountEmails[$0] } }
+
     func label(_ folder: SessionFolder) -> String {
-        var s = nicknames[folder.id].flatMap { $0.isEmpty ? nil : $0 } ?? folder.shortLabel
+        var s: String
+        if let nick = nicknames[folder.id], !nick.isEmpty {
+            s = nick
+        } else if let email = accountEmails[folder.accountId] {
+            // An account can have several org folders; name the org only when it is needed to tell them apart.
+            let siblings = snapshot?.folders.filter { $0.folder.accountId == folder.accountId && !$0.folder.isBackupCopy }.count ?? 1
+            s = email
+            if siblings > 1 || folder.isBackupCopy { s += " / org " + String(folder.orgId.prefix(8)) }
+            if folder.isBackupCopy { s += " (backup copy)" }
+        } else {
+            s = folder.shortLabel
+        }
         if folder.accountId == snapshot?.activeAccountId, !folder.isBackupCopy { s += " (signed in)" }
         return s
     }
@@ -362,6 +378,7 @@ final class AppModel {
     // MARK: Index
 
     func loadIndexStats() {
+        accountEmails = TranscriptIndex.accountEmails(paths: paths)
         guard let idx = try? TranscriptIndex(paths: paths, settings: indexSettings) else { return }
         let s = idx.stats()
         indexFiles = s.files
@@ -390,7 +407,9 @@ final class AppModel {
                 let idx = try TranscriptIndex(paths: paths, settings: settings)
                 try idx.update(progress: { p in onMainQueue { self.indexProgress = p } }, cancelled: { flag.isSet })
                 let s = idx.stats()
+                let emails = TranscriptIndex.accountEmails(paths: paths)
                 onMainQueue {
+                    self.accountEmails = emails
                     self.indexFiles = s.files
                     self.indexMessages = s.messages
                     self.indexLastRun = s.lastRun
