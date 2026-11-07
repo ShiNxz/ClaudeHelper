@@ -36,10 +36,10 @@ struct AccountsView: View {
                 }
             }
             Section("When switching") {
-                Toggle("Sync chats between the account folders picked in Account sync", isOn: $model.switchSyncEnabled)
-                Text(model.syncSelection.count >= 2
-                     ? "\(model.syncSelection.count) folders are picked. Each sync is backed up first."
-                     : "Pick at least two folders in Account sync for this to do anything.")
+                Toggle("Merge chats between the accounts picked in Sync chats", isOn: $model.switchSyncEnabled)
+                Text(model.pickedAccounts.count >= 2
+                     ? "\(model.pickedAccounts.count) accounts are picked. Each merge is backed up first."
+                     : "Pick at least two accounts in Sync chats for this to do anything.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if model.switching || !model.switchSteps.isEmpty {

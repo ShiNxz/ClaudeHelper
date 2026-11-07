@@ -28,7 +28,7 @@ struct MenuContent: View {
     var body: some View {
         Button("Open Claude Helper") { show(.sessions) }
         Button("Search Chats") { show(.search) }
-        Button("Account Sync") { show(.sync) }
+        Button("Sync Chats") { show(.sync) }
         Divider()
         if model.switching {
             Text("Switching: " + (model.switchSteps.last ?? "starting"))

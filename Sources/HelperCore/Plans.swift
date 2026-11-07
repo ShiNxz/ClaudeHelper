@@ -65,12 +65,16 @@ public struct SessionEdit: Sendable, Hashable {
 public enum WriteIntent: Sendable {
     case edits([SessionEdit])
     case sync(folderIds: [String])
+    /// One way: chats in the source folders are added to or updated in the target folders. Nothing is deleted
+    /// and the source folders are never written.
+    case copy(sourceFolderIds: [String], targetFolderIds: [String])
     case restoreBackup(BackupInfo)
 
     public var label: String {
         switch self {
         case .edits(let e): return "edit \(e.count) chat" + (e.count == 1 ? "" : "s")
         case .sync(let f): return "sync \(f.count) folders"
+        case .copy(let s, let t): return "copy \(s.count) folders into \(t.count)"
         case .restoreBackup(let b): return "restore backup \(b.id)"
         }
     }
@@ -81,6 +85,7 @@ public enum Planner {
         switch intent {
         case .edits(let edits): return planEdits(edits, paths: paths)
         case .sync(let ids): return planSync(folderIds: ids, paths: paths)
+        case .copy(let src, let dst): return planCopy(sourceIds: src, targetIds: dst, paths: paths)
         case .restoreBackup(let b): return planRestore(b, paths: paths)
         }
     }
@@ -317,6 +322,94 @@ public enum Planner {
                 plan.problems.append(GuardProblem(path: scan.archivedIndex.url, message: error.localizedDescription))
             }
         }
+        return plan
+    }
+
+    // MARK: One-way copy
+
+    static func planCopy(sourceIds: [String], targetIds: [String], paths: HelperPaths) -> WritePlan {
+        var plan = WritePlan(title: "Copy chats into \(targetIds.count) folder" + (targetIds.count == 1 ? "" : "s"), reason: "copy")
+        let all = SessionScanner.listFolders(root: paths.sessionsRoot)
+        let sources = sourceIds.compactMap { id in all.first { $0.id == id } }
+        let targets = targetIds.filter { !sourceIds.contains($0) }.compactMap { id in all.first { $0.id == id } }
+        guard !sources.isEmpty, !targets.isEmpty else {
+            plan.problems.append(GuardProblem(path: paths.sessionsRoot, message: "pick an account to copy from and at least one to copy to"))
+            return plan
+        }
+        plan.folders = targets
+        let sourceScans = sources.map(SessionScanner.scanFolder)
+        let targetScans = targets.map(SessionScanner.scanFolder)
+        for scan in sourceScans + targetScans {
+            for (url, why) in scan.unreadable { plan.problems.append(GuardProblem(path: url, message: why)) }
+        }
+        for scan in targetScans {
+            if let p = scan.archivedIndex.problem { plan.problems.append(GuardProblem(path: scan.archivedIndex.url, message: p)) }
+        }
+
+        // Newest copy of each chat within the source account. Chats deleted there are not copied.
+        var sourceMarkers = Set<String>()
+        for scan in sourceScans { sourceMarkers.formUnion(scan.deletedMarkers.keys) }
+        var best: [String: SessionRecord] = [:]
+        for scan in sourceScans {
+            for s in scan.sessions where !sourceMarkers.contains(s.uuid) {
+                if !s.problems.isEmpty {
+                    s.problems.forEach { plan.problems.append(GuardProblem(path: s.fileURL, message: $0)) }
+                    continue
+                }
+                if let cur = best[s.sessionId], cur.fileMTime >= s.fileMTime { continue }
+                best[s.sessionId] = s
+            }
+        }
+
+        for scan in targetScans {
+            var archived = Set(scan.archivedIndex.ids ?? [])
+            let before = archived
+            let mine = Dictionary(scan.sessions.map { ($0.sessionId, $0) }, uniquingKeysWith: { a, _ in a })
+            for (sid, src) in best.sorted(by: { $0.key < $1.key }) {
+                // Deleted in this account: leave it deleted.
+                if scan.deletedMarkers[src.uuid] != nil { continue }
+                guard let data = try? Data(contentsOf: src.fileURL) else {
+                    plan.problems.append(GuardProblem(path: src.fileURL, message: "could not read"))
+                    continue
+                }
+                if let have = mine[sid] {
+                    if !have.problems.isEmpty {
+                        have.problems.forEach { plan.problems.append(GuardProblem(path: have.fileURL, message: $0)) }
+                        continue
+                    }
+                    // This account already has the same or a newer copy: keep it.
+                    if have.fileMTime >= src.fileMTime { continue }
+                    if (try? Data(contentsOf: have.fileURL)) == data { continue }
+                    plan.changes.append(PlannedChange(
+                        folder: scan.folder, kind: .update, target: scan.folder.sessionURL(sid),
+                        summary: quoted(src.title) + ": update from " + src.folder.shortLabel,
+                        detail: "newer copy " + dateFmt.string(from: src.fileMTime) + " replaces " + dateFmt.string(from: have.fileMTime),
+                        operation: .write(data, mtime: src.fileMTime)))
+                } else {
+                    plan.changes.append(PlannedChange(
+                        folder: scan.folder, kind: .add, target: scan.folder.sessionURL(sid),
+                        summary: quoted(src.title) + ": add from " + src.folder.shortLabel,
+                        detail: (src.isArchived ? "archived" : "active") + ", last change " + dateFmt.string(from: src.fileMTime),
+                        operation: .write(data, mtime: src.fileMTime)))
+                }
+                if src.isArchived { archived.insert(sid) } else { archived.remove(sid) }
+                if data.count > 100_000 {
+                    plan.warnings.append(quoted(src.title) + " is \(data.count / 1024) KB (connector config). A copy this big once failed to show in the sidebar.")
+                }
+            }
+            if archived != before, scan.archivedIndex.ids != nil {
+                let added = archived.subtracting(before).count, removed = before.subtracting(archived).count
+                do {
+                    plan.changes.append(PlannedChange(folder: scan.folder, kind: .archivedIndex, target: scan.archivedIndex.url,
+                                                      summary: "Archived list: " + idxDelta(added, removed) + " (\(archived.count) total)",
+                                                      detail: scan.archivedIndex.exists ? nil : "file will be created",
+                                                      operation: .write(try SchemaGuard.encodeArchivedIndex(Array(archived)), mtime: nil)))
+                } catch {
+                    plan.problems.append(GuardProblem(path: scan.archivedIndex.url, message: error.localizedDescription))
+                }
+            }
+        }
+        plan.warnings = Array(Set(plan.warnings)).sorted()
         return plan
     }
 

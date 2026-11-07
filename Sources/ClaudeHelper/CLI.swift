@@ -23,6 +23,7 @@ enum CLI {
               search <query> [--role user|assistant|tool]
               edit --folder <acct/org> --session <local_id> [--restore|--archive|--pin|--unpin|--title T] [--apply]
               sync <acct/org> <acct/org> ... [--apply]
+              copy <acct/org,...> <acct/org,...> [--apply]   one way, from the first list into the second
               backup [<acct/org> ...]              back up folders now (default: all live folders), changes nothing
               backups
               restore-backup <backup id> [--apply]
@@ -113,6 +114,13 @@ enum CLI {
                 if args.contains("--unpin") { e.isStarred = false }
                 if let t = value(args, "--title") { e.title = t }
                 return try await planAndMaybeApply(.edits([e]), paths: paths, args: args)
+            case "copy":
+                // copy <source folders, comma separated> <target folders, comma separated> [--apply]
+                let rest = args.dropFirst().filter { !$0.hasPrefix("--") }
+                guard rest.count == 2 else { out("usage: copy <src,src> <dst,dst> [--apply]"); return 2 }
+                let src = rest[rest.startIndex].split(separator: ",").map(String.init)
+                let dst = rest[rest.startIndex + 1].split(separator: ",").map(String.init)
+                return try await planAndMaybeApply(.copy(sourceFolderIds: src, targetFolderIds: dst), paths: paths, args: args)
             case "sync":
                 let ids = args.dropFirst().filter { !$0.hasPrefix("--") }
                 return try await planAndMaybeApply(.sync(folderIds: Array(ids)), paths: paths, args: args)

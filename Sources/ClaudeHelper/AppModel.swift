@@ -7,7 +7,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case sessions = "Sessions"
     case search = "Search"
     case accounts = "Accounts"
-    case sync = "Account sync"
+    case sync = "Sync chats"
     case backups = "Backups"
     var id: String { rawValue }
     var icon: String {
@@ -88,8 +88,13 @@ final class AppModel {
     }
 
     // Sync
-    var syncSelection: Set<String> {
-        didSet { UserDefaults.standard.set(Array(syncSelection), forKey: "syncSelection") }
+    /// Accounts that should share chats.
+    var syncAccounts: Set<String> {
+        didSet { UserDefaults.standard.set(Array(syncAccounts), forKey: "syncAccounts") }
+    }
+    /// nil: merge all picked accounts. Otherwise copy from this account to the other picked ones.
+    var syncSource: String? {
+        didSet { UserDefaults.standard.set(syncSource, forKey: "syncSource") }
     }
     var nicknames: [String: String] {
         didSet { UserDefaults.standard.set(nicknames, forKey: "folderNicknames") }
@@ -98,7 +103,10 @@ final class AppModel {
     init() {
         let d = UserDefaults.standard
         indexSettings = IndexSettings(includeToolOutput: d.bool(forKey: "index.tools"), includeSubagents: d.bool(forKey: "index.subagents"))
-        syncSelection = Set(d.stringArray(forKey: "syncSelection") ?? [])
+        // Older versions stored picked folders ("<account>/<org>"); keep their accounts.
+        let oldFolders = d.stringArray(forKey: "syncSelection") ?? []
+        syncAccounts = Set(d.stringArray(forKey: "syncAccounts") ?? oldFolders.compactMap { $0.split(separator: "/").first.map(String.init) })
+        syncSource = d.string(forKey: "syncSource")
         nicknames = d.dictionary(forKey: "folderNicknames") as? [String: String] ?? [:]
         switchSyncEnabled = d.bool(forKey: "switch.sync")
         refresh()
@@ -237,25 +245,41 @@ final class AppModel {
 
     // MARK: Sync and backups
 
-    /// The folder an account actually uses: the live folder with the most recent chat activity.
-    func mainFolderId(forAccount id: String) -> String? {
-        let candidates = (snapshot?.folders ?? []).filter { $0.folder.accountId == id && !$0.folder.isBackupCopy && !$0.sessions.isEmpty }
-        return candidates.max { a, b in
-            let la = a.sessions.compactMap(\.lastActivityAt).max() ?? .distantPast
-            let lb = b.sessions.compactMap(\.lastActivityAt).max() ?? .distantPast
-            return la != lb ? la < lb : a.sessions.count < b.sessions.count
-        }?.folder.id
+    /// The chat lists (folders) of an account that hold chats. An account has one per organization it used.
+    /// Falls back to all its folders when none has chats yet.
+    func folderIds(forAccount id: String) -> [String] {
+        let live = (snapshot?.folders ?? []).filter { $0.folder.accountId == id && !$0.folder.isBackupCopy }
+        let used = live.filter { !$0.sessions.isEmpty || !$0.deletedMarkers.isEmpty }
+        return (used.isEmpty ? live : used).map(\.folder.id)
     }
 
-    func pickMainFolders() {
-        let accounts = Set((snapshot?.folders ?? []).map(\.folder.accountId))
-        syncSelection = Set(accounts.compactMap { mainFolderId(forAccount: $0) })
+    /// Distinct chats across an account's folders.
+    func chatCount(forAccount id: String) -> Int {
+        let ids = Set(folderIds(forAccount: id))
+        var chats = Set<String>()
+        for f in snapshot?.folders ?? [] where ids.contains(f.folder.id) { chats.formUnion(f.sessions.map(\.sessionId)) }
+        return chats.count
+    }
+
+    /// Picked accounts in display order.
+    var pickedAccounts: [String] { accountEntries.map(\.id).filter { syncAccounts.contains($0) } }
+
+    /// All folders of the picked accounts (what a merge, and the sync on switch, works on).
+    var syncFolderIds: [String] { pickedAccounts.flatMap { folderIds(forAccount: $0) } }
+
+    var syncIntent: WriteIntent? {
+        let picked = pickedAccounts
+        if let src = syncSource, picked.contains(src) {
+            let targets = picked.filter { $0 != src }.flatMap { folderIds(forAccount: $0) }
+            guard !targets.isEmpty else { return nil }
+            return .copy(sourceFolderIds: folderIds(forAccount: src), targetFolderIds: targets)
+        }
+        let folders = syncFolderIds
+        return folders.count >= 2 ? .sync(folderIds: folders) : nil
     }
 
     func previewSync(folderIds: [String]? = nil) {
-        let chosen = folderIds.map(Set.init) ?? syncSelection
-        let ordered = snapshot?.folders.map(\.folder.id).filter { chosen.contains($0) } ?? Array(chosen)
-        let intent = WriteIntent.sync(folderIds: ordered)
+        guard let intent = folderIds.map({ WriteIntent.sync(folderIds: $0) }) ?? syncIntent else { return }
         planSheet = PlanSheet(intent: intent, plan: Planner.plan(intent, paths: paths))
     }
 
@@ -392,7 +416,7 @@ final class AppModel {
         let alert = NSAlert()
         alert.messageText = "Switch Claude to \(p.name)?"
         var info = "Claude will quit, which stops any running Code sessions, then reopen signed in as \(p.name). The current login is saved first and backed up."
-        if switchSyncEnabled, syncSelection.count >= 2 { info += " Chats are synced between the account folders picked in Account sync." }
+        if switchSyncEnabled, syncFolderIds.count >= 2 { info += " Chats are merged between the accounts picked in Sync chats first." }
         alert.informativeText = info
         alert.addButton(withTitle: "Switch")
         alert.addButton(withTitle: "Cancel")
@@ -465,7 +489,7 @@ final class AppModel {
         switching = true
         switchSteps = []
         let paths = self.paths
-        let sync: [String]? = switchSyncEnabled ? (snapshot?.folders.map(\.folder.id).filter { syncSelection.contains($0) }) : nil
+        let sync: [String]? = switchSyncEnabled ? syncFolderIds : nil
         Task { @MainActor in
             var message: String
             var warnings: [String] = []

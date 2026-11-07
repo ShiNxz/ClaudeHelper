@@ -13,7 +13,7 @@ It works with Claude's undocumented local files. A Claude update can change them
 - **Sessions browser.** One table of every Code session in every account folder: title, project, account folder, archived, pinned, last activity. Filter, sort, double-click to open the chat in Claude. Read-only, works while Claude is running.
 - **Search old chats.** Full-text search over your transcripts in `~/.claude/projects`, with a local SQLite index that updates incrementally in the background. A result opens the chat in Claude, or, for chats with no sidebar entry, copies the `claude --resume` command.
 - **Restore archived chats** back into the sidebar.
-- **Account sync.** Pick the account folders that should hold the same chats. The newest copy of each chat wins and goes to every picked folder, deleted chats stay deleted, and each folder's archived list is rebuilt. You see every change before anything is written.
+- **Sync chats between accounts.** Tick accounts and either merge them (every account gets every chat) or copy one account's chats into the others. You see every change before anything is written.
 - **Bulk rename, pin and archive** from the browser.
 - **Backups.** Every write is backed up first, and any backup can be put back.
 
@@ -86,7 +86,8 @@ All paths below are inside `~/Library/Application Support/Claude/claude-code-ses
 | Archive | `local_<id>.json` (`isArchived` true, and `isStarred` false if it was pinned) and `archived-sessions.idx` (id added) | Claude does not allow pinned chats to be archived. |
 | Pin / unpin | `local_<id>.json` (`isStarred`) | Best effort, see known gaps. |
 | Rename | `local_<id>.json` (`title`, and `titleSource` set to `user` so Claude keeps the name) | Bulk rename does find and replace plus an optional prefix. |
-| Account sync | `local_*.json` copied between the picked folders, `deleted_<id>` markers copied, `archived-sessions.idx` rebuilt | See below. |
+| Sync chats: merge | `local_*.json` copied between the picked accounts' folders, `deleted_<id>` markers copied, `archived-sessions.idx` rebuilt | See below. |
+| Sync chats: copy from one account | `local_*.json` added or updated in the other accounts' folders and their `archived-sessions.idx` | The source account is never written. Nothing is deleted. |
 | Restore backup | the backed-up `local_*.json`, `archived-sessions.idx` and `deleted_*` | Files in the folder now that are not in the backup are moved into a new safety backup, not deleted. |
 | Back Up Now | none | Only writes a backup. |
 | Save this login | none | Copies `Cookies` and the login keys of `config.json` into `ClaudeHelper/profiles/<name>/`. Works while Claude runs. |
@@ -95,9 +96,9 @@ All paths below are inside `~/Library/Application Support/Claude/claude-code-ses
 
 Editing a chat changes only the top-level keys listed above. The rest of the file stays byte for byte the same (key order, numbers, escaping), and each patched file is re-parsed and compared before it is written.
 
-### Account sync in detail
+### Merge in detail
 
-For every chat found in any picked folder:
+For every chat found in any folder of the picked accounts:
 
 - If any picked folder has a `deleted_<id>` marker for it, it is not brought back. Copies in the picked folders are moved into the backup's `removed/` folder, and the marker is added to the folders that lack it.
 - Otherwise the copy with the newest file modification time wins and is written to every picked folder where it is missing or different. The copy keeps the winner's modification time, so running sync again finds nothing to do.
@@ -132,7 +133,12 @@ After a switch the helper reads Claude's log. If Claude rejects the saved login,
 
 ### Same chats in every account
 
-Claude keeps a separate chat list per account, and inside an account per organization. In **Account sync**, click **Pick Main Folders** to pick the folder each account actually uses, untick accounts you want to leave out, then **Preview Sync** and apply. Turn on **Sync chats** in **Accounts** to repeat the sync on every switch.
+Open **Sync chats**, tick the accounts, and choose how:
+
+- **Merge:** every picked account ends up with every chat. When two accounts have the same chat, the newest copy wins, and a chat deleted in one account stays deleted in all of them.
+- **Copy from one account to the others:** for example from the account you are signed in to. It only adds and updates chats in the other accounts, never deletes anything there, and never writes to the account it copies from. If an account already has a newer copy of a chat, it keeps its copy.
+
+Claude keeps one chat list per account per organization. An account that used more than one organization has several, and all of them are included, so you never have to pick folders. **Preview** shows every change before anything is written. Turn on the merge option in **Accounts** to merge the picked accounts on every switch.
 
 ## Search index
 

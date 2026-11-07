@@ -181,6 +181,49 @@ enum SelfTest {
         check(TranscriptIndex.ftsQuery("\"exact phrase\" more") == "\"exact phrase\" \"more\"", "query: phrase plus word")
 
         try await profileTests(paths)
+        try copyTests(base)
+    }
+
+    /// One-way copy from one account (two organizations) into two others.
+    static func copyTests(_ base: URL) throws {
+        let paths = HelperPaths(sessionsRoot: base.appendingPathComponent("copy-sessions"),
+                                claudeConfig: base.appendingPathComponent("copy-config.json"),
+                                projectsRoot: base.appendingPathComponent("projects"),
+                                dataDir: base.appendingPathComponent("copy-data"),
+                                claudeLog: base.appendingPathComponent("copy.log"))
+        let src1 = paths.sessionsRoot.appendingPathComponent("acct-s/org-1")
+        let src2 = paths.sessionsRoot.appendingPathComponent("acct-s/org-2")
+        let t = paths.sessionsRoot.appendingPathComponent("acct-t/org-1")
+        let u = paths.sessionsRoot.appendingPathComponent("acct-u/org-1")
+        try write(session("c1", title: "Shared", archived: false, cli: "k1"), src1.appendingPathComponent("local_c1.json"))
+        try write(session("c2", title: "Archived one", archived: true, cli: "k2"), src1.appendingPathComponent("local_c2.json"))
+        try write(session("c3", title: "Deleted in source", archived: false, cli: "k3"), src1.appendingPathComponent("local_c3.json"))
+        try write("1", src1.appendingPathComponent("deleted_c3"))
+        try write(session("c4", title: "Other org", archived: false, cli: "k4"), src2.appendingPathComponent("local_c4.json"))
+        try write("{\"v\":1,\"archived\":[\"local_c2\"]}", src1.appendingPathComponent("archived-sessions.idx"))
+        try write(session("c1", title: "Shared older", archived: false, cli: "k1"), t.appendingPathComponent("local_c1.json"))
+        try setMTime(t.appendingPathComponent("local_c1.json"), 3600)
+        try write(session("c5", title: "Own chat", archived: false, cli: "k5"), t.appendingPathComponent("local_c5.json"))
+        try write("1", t.appendingPathComponent("deleted_c2"))
+        try write("{\"v\":1,\"archived\":[]}", t.appendingPathComponent("archived-sessions.idx"))
+        try write(session("c1", title: "Shared newer here", archived: false, cli: "k1"), u.appendingPathComponent("local_c1.json"))
+        try setMTime(src1.appendingPathComponent("local_c1.json"), 60)
+        try write("{\"v\":1,\"archived\":[]}", u.appendingPathComponent("archived-sessions.idx"))
+
+        let srcBefore1 = contents(src1), srcBefore2 = contents(src2)
+        let plan = Planner.plan(.copy(sourceFolderIds: ["acct-s/org-1", "acct-s/org-2"], targetFolderIds: ["acct-t/org-1", "acct-u/org-1"]), paths: paths)
+        check(plan.canApply && !plan.changes.contains { $0.folder.accountId == "acct-s" }, "copy: plan never writes the source account")
+        _ = try Executor.apply(plan, paths: paths)
+        let tAfter = contents(t), uAfter = contents(u)
+        check(contents(src1) == srcBefore1 && contents(src2) == srcBefore2, "copy: source folders unchanged")
+        check(String(decoding: tAfter["local_c1.json"]!, as: UTF8.self).contains("\"Shared\"") && tAfter["local_c4.json"] != nil,
+              "copy: newer source copy updates, chats from every source org are added")
+        check(tAfter["local_c2.json"] == nil && tAfter["local_c3.json"] == nil, "copy: chats deleted in the target or the source are not copied")
+        check(tAfter["local_c5.json"] != nil, "copy: the target's own chats stay")
+        check(String(decoding: uAfter["local_c1.json"]!, as: UTF8.self).contains("newer here"), "copy: a newer copy in the target is kept")
+        check(SchemaGuard.parseArchivedIndex(uAfter["archived-sessions.idx"]!).ids == ["local_c2"], "copy: archived list follows the copied chats")
+        check(Planner.plan(.copy(sourceFolderIds: ["acct-s/org-1", "acct-s/org-2"], targetFolderIds: ["acct-t/org-1", "acct-u/org-1"]), paths: paths).changes.isEmpty,
+              "copy: a second copy has nothing to do")
     }
 
     static func sqlite(_ db: URL, _ sql: String) throws -> String {
