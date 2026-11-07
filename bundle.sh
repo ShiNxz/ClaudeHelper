@@ -7,14 +7,14 @@
 #   ./bundle.sh --install     also copy the app to /Applications
 #
 # Environment:
-#   VERSION        version string, default 0.1.0 (a leading "v" is dropped, so tags work)
+#   VERSION        version string, default the latest git tag (a leading "v" is dropped, so tags work)
 #   BUILD_NUMBER   CFBundleVersion, default 1
 #   SIGN_IDENTITY  "-" (default) for ad-hoc signing, or a "Developer ID Application: ..." identity,
 #                  which also turns on the hardened runtime and a secure timestamp
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)}"
 VERSION="${VERSION#v}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
