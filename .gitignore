@@ -3,3 +3,7 @@ build/
 *.app
 .DS_Store
 .swiftpm/
+
+# Relay for Windows (Rust/Tauri)
+windows/target/
+windows/src-tauri/gen/

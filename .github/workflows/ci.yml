@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  build:
+  macos:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -21,3 +21,28 @@ jobs:
           else
             echo "Rosetta not available, skipping"
           fi
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: windows
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test the core
+        run: cargo test -p relay-core
+      - name: Build the installer
+        run: npx --yes @tauri-apps/cli@2.12.4 build --bundles nsis
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-windows-ci
+          path: windows/target/release/bundle/nsis/*-setup.exe
+          retention-days: 7

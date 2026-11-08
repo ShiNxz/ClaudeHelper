@@ -1,0 +1,31 @@
+[package]
+name = "relay-core"
+version = "0.4.0"
+edition = "2021"
+description = "Relay core: Claude desktop accounts, chats, usage and switching"
+license = "MIT"
+publish = false
+
+[lib]
+name = "relay_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "relay-cli"
+path = "src/bin/relay-cli.rs"
+
+[dependencies]
+chrono = "0.4.45"
+dirs = "7.0.0"
+filetime = "0.2.29"
+flate2 = "1.1.11"
+regex = "1.13.1"
+rusqlite = { version = "0.41.1", features = ["bundled", "backup"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tar = "0.4.46"
+uuid = { version = "1.29.1", features = ["v4"] }
+
+[target."cfg(windows)".dependencies]
+sysinfo = "0.40.1"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }

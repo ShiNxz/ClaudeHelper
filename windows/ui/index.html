@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Relay</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <nav id="nav" aria-label="Sections">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="2" y="4" width="20" height="15" rx="5" fill="var(--accent)"/>
+          <path d="M5 18 L4 22 L10 18 Z" fill="var(--accent)"/>
+          <path d="M12 6.4 C12.5 9.6 13.4 10.6 16.6 11.1 C13.4 11.6 12.5 12.6 12 15.8 C11.5 12.6 10.6 11.6 7.4 11.1 C10.6 10.6 11.5 9.6 12 6.4 Z" fill="var(--accent-fg)"/>
+        </svg>
+        <span>Relay</span>
+      </div>
+      <div id="navItems"></div>
+      <div id="navFooter" class="nav-footer"></div>
+    </nav>
+    <main id="view" tabindex="-1"></main>
+  </div>
+  <div id="modalRoot"></div>
+  <div id="toastRoot" aria-live="polite"></div>
+  <script src="mock.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
