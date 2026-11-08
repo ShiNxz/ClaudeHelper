@@ -194,7 +194,44 @@ function renderNav() {
   if (S.app.switching) html += '<div class="row"><span class="dot busy"></span><span>Switching: ' + esc(S.steps[S.steps.length - 1] || "starting") + "</span></div>";
   if (idx.running) html += '<div class="progress" style="width:100%"><div style="width:' + Math.round(idx.fraction * 100) + '%"></div></div>';
   html += '<div class="faint">' + esc(idx.status) + "</div>";
+  const up = S.app.update;
+  if (up && up.available) {
+    html += '<div class="update-row"><span>Relay ' + esc(up.version) + ' is available</span>'
+      + '<button class="btn sm primary" data-update-install>Install</button></div>';
+  }
   f.innerHTML = html;
+}
+
+document.getElementById("navFooter").addEventListener("click", (e) => {
+  if (e.target.closest("[data-update-install]")) installUpdate();
+});
+
+async function checkUpdate() {
+  try {
+    S.app = await invoke("check_update");
+    renderNav();
+    renderView();
+    const up = S.app.update;
+    if (!up.available && !up.error) toast({ text: "Relay " + up.current + " is the latest version." });
+  } catch (e) {
+    toast({ title: "Could not check for updates", text: errText(e), warning: true });
+  }
+}
+
+async function installUpdate() {
+  const up = S.app && S.app.update;
+  if (!up || !up.available) return;
+  const ok = await confirmDialog({
+    title: "Install Relay " + up.version + "?",
+    text: "Relay downloads the update, checks its signature, installs it and restarts. Claude keeps running.",
+    ok: "Install and Restart",
+  });
+  if (!ok) return;
+  try {
+    await invoke("install_update");
+  } catch (e) {
+    toast({ title: "Could not install the update", text: errText(e), warning: true });
+  }
 }
 
 document.getElementById("navItems").addEventListener("click", (e) => {
@@ -563,6 +600,8 @@ $view.addEventListener("click", (e) => {
     case "acct-rename": renameProfile(action.dataset.id); break;
     case "acct-forget": forgetProfile(action.dataset.id); break;
     case "add-account": addAccount(); break;
+    case "update-check": checkUpdate(); break;
+    case "update-install": installUpdate(); break;
     // sync
     case "sync-preview": preview("preview_sync", {}); break;
     // backups
@@ -1103,6 +1142,14 @@ function viewAccounts() {
   html += '<div class="section-title"><h2>When switching</h2></div><div class="card">'
     + setting("Merge chats between the accounts picked in Sync chats", null, "switchSync", st.switchSync, false)
     + '<div class="caption">' + (picked >= 2 ? picked + " accounts are picked. Each merge is backed up first." : 'Pick at least two accounts in <button class="link" data-go="sync">Sync chats</button> for this to do anything.') + "</div></div>";
+
+  const up = st.update || {};
+  html += '<div class="section-title"><h2>Updates</h2></div><div class="card">'
+    + setting("Check for updates automatically", "When Relay starts and every 6 hours it asks GitHub for the latest release. Nothing else is sent.", "autoUpdateCheck", !!up.autoCheck, false)
+    + '<div class="setting"><div class="label">' + (up.available ? "Relay " + esc(up.version) + " is available" : "Relay " + esc(up.current || st.appVersion))
+    + '<div class="sub">' + (up.error ? esc(up.error) : up.available ? "You have " + esc(up.current || st.appVersion) + "." : up.checking ? "Checking..." : "Updates are signed and checked before they install.") + "</div></div>"
+    + '<span class="row-actions"><button class="btn" data-action="update-check"' + (up.checking ? " disabled" : "") + ">Check Now</button>"
+    + (up.available ? '<button class="btn primary" data-action="update-install">Install and Restart</button>' : "") + "</span></div></div>";
 
   html += '<p class="note">Saved logins stay on this PC in ' + esc(st.paths.data) + ". They are copies of Claude's own encrypted login data, work only for your Windows user on this PC, and never leave it.</p>";
   return html + "</div></div>";

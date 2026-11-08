@@ -408,3 +408,8 @@ details.disclosure[open] > summary svg { transform: rotate(90deg); }
   #app { grid-template-columns: 176px minmax(0, 1fr); }
   .details { width: 260px; }
 }
+
+/* Update notice in the nav footer and the Updates card */
+.update-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin-top: 8px; padding: 8px 10px;
+  border-radius: 8px; background: var(--accent-soft, rgba(194, 100, 60, 0.12)); color: var(--fg, inherit); font-size: 12px; }
+.row-actions { display: inline-flex; gap: 8px; flex-shrink: 0; }

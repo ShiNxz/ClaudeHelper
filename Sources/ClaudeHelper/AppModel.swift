@@ -53,6 +53,7 @@ final class CancelFlag: @unchecked Sendable {
 @Observable
 final class AppModel {
     let paths = HelperPaths.standard()
+    let updater = Updater()
 
     var section: AppSection = .sessions
     var searchQuery = ""
@@ -144,6 +145,8 @@ final class AppModel {
         autoSwitchThreshold = (50...100).contains(t) ? t : 95
         autoSwitchWaitForIdle = d.object(forKey: "autoSwitch.waitForIdle") as? Bool ?? true
         Notifier.shared.setUp()
+        updater.model = self
+        updater.start()
         refresh()
         loadIndexStats()
         startIndexing()

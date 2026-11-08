@@ -44,7 +44,8 @@ Relay sits next to Claude in the menu bar (macOS) or the tray (Windows) and fixe
 | **Auto-switch** | When an account reaches your threshold (95% by default), Relay waits for running chats to finish, moves to the least used account and brings your recent chats along. Off until you turn it on. |
 | **Chats that follow you** | One list of every Code chat across accounts. A chat only another account has gets **Add to This Account**, so Claude can open it. Or keep accounts in sync. |
 | **Search old chats** | Full-text search across all your Claude Code transcripts, kept up to date in the background. |
-| **Safe by design** | Every change is previewed, Claude is closed while it happens, and a backup is made first. No network, no telemetry. |
+| **Updates itself** | Checks GitHub for a new version and installs it in one click. Updates are signed, and Relay refuses any that don't match its key. |
+| **Safe by design** | Every change is previewed, Claude is closed while it happens, and a backup is made first. No telemetry. |
 
 ## Get started
 
@@ -123,7 +124,7 @@ User and assistant text from the main transcripts, kept in a local SQLite FTS5 i
 
 ## Privacy and safety
 
-- **No network.** Relay makes no network requests and has no analytics. Opening a chat hands a `claude://` link to Claude, which is the only thing that leaves Relay.
+- **One network request: the update check.** When Relay starts and every 6 hours it downloads a small file from the latest GitHub release to see if there is a newer version (turn it off in the menu on macOS, in Accounts on Windows). Nothing about you or your accounts is sent, and there are no analytics. An update is downloaded only when you click Install, and installed only if its signature matches the key built into Relay. Opening a chat hands a `claude://` link to Claude.
 - **Your logins stay encrypted.** Relay copies Claude's login data as it is. It never decrypts it, never reads the Keychain or Windows credential store, and never shows, logs or sends it. Saved logins only work on the computer they were saved on.
 - **Preview, backup, then write.** Every change is listed before it happens. Claude is closed while Relay writes (quitting Claude stops running Code chats until it reopens), every touched folder is backed up first, files are written atomically, and only Claude's sidebar files can be written at all. Any backup can be put back.
 - **Its own data** lives in `~/Library/Application Support/ClaudeHelper/` on macOS and `%APPDATA%\Relay\` on Windows: search index, backups, saved logins, settings, and a list of which account was signed in when (account ids and times only). Delete that folder to remove everything.
@@ -161,6 +162,7 @@ Edits change only the listed top-level keys; the rest of the file stays byte for
 - **Pins** also live in Claude's web storage, which Relay does not edit, so the sidebar may not follow a pin change.
 - **Claude updates** can move or change these files. The schema check should then block writes until Relay is updated.
 - **Emails** are only known for accounts with at least one Code transcript from a recent Claude version; others show their account id.
+- **Updating on macOS** replaces Relay where it is installed, so that folder must be writable by you (it is for `/Applications` on an admin account). Otherwise Relay points you to the release page.
 - **Windows:** Claude may keep its login files locked while it runs, so saving a login can need Claude to close for a moment (Relay asks). If Claude only hides in the tray when its window closes, Relay ends it after 30 seconds when **If Claude does not close, force it to quit** is on (the default).
 
 ## Windows testers wanted
@@ -201,9 +203,21 @@ The macOS binary has a terminal mode too: `Relay.app/Contents/MacOS/Relay --cli`
 <details>
 <summary>Releases and signing</summary>
 
-Pushing a tag such as `v0.4.0` runs `.github/workflows/release.yml`: a macOS job builds the universal DMG and runs the self-test, a Windows job runs the Rust tests and builds the NSIS installer, and a final job attaches both and a `SHA256SUMS.txt` to one GitHub Release. Pushes to `main` and pull requests run the same builds and tests in `.github/workflows/ci.yml`.
+Pushing a tag such as `v0.5.0` runs `.github/workflows/release.yml`: a macOS job builds the universal DMG and runs the self-test, a Windows job runs the Rust tests and builds the NSIS installer, and a final job attaches both, the update files and a `SHA256SUMS.txt` to one GitHub Release. Pushes to `main` and pull requests run the same builds and tests in `.github/workflows/ci.yml`. Every signing step below runs only when its secret exists, so releases work without any of them.
 
-To ship a signed and notarized macOS build, add these repository secrets; the steps run only when they exist:
+**Update signing.** Each release carries `latest-mac.json` and `latest.json`, which tell installed copies about it. The apps only install an update whose signature matches the public key they were built with (`Updater.publicKey` in `Sources/ClaudeHelper/Updater.swift`, `plugins.updater.pubkey` in `windows/src-tauri/tauri.conf.json`). The private keys are repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `RELAY_MAC_UPDATE_KEY` | Ed25519 private key for macOS updates, from `swift scripts/sign-update.swift generate <file>` |
+| `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key for Windows updates, from `npx @tauri-apps/cli signer generate` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Its password, if it has one |
+
+Keep a backup of both private keys. If one is lost, installed copies can no longer verify new updates, and everyone has to install the next version by hand once.
+
+**Windows code signing** is set up for [SignPath](https://signpath.org), which signs open source projects for free. Once the project is approved there, add the secret `SIGNPATH_API_TOKEN` and the variable `SIGNPATH_ORGANIZATION_ID` (and `SIGNPATH_PROJECT_SLUG` and `SIGNPATH_SIGNING_POLICY_SLUG` if they differ from `relay` and `release-signing`). The installer is then signed before the update signature is made, so both match the published file.
+
+**macOS code signing and notarization** need these secrets:
 
 | Secret | Value |
 | --- | --- |

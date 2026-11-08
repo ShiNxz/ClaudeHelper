@@ -1,6 +1,6 @@
 [package]
 name = "relay"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Relay: use several Claude accounts on one computer"
 license = "MIT"
@@ -15,7 +15,7 @@ name = "relay"
 path = "src/main.rs"
 
 [dependencies]
-relay-core = { version = "0.4.0", path = "../core" }
+relay-core = { version = "0.5.0", path = "../core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
@@ -23,6 +23,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
 uuid = { version = "1.29.1", features = ["v4"] }
 
 [build-dependencies]

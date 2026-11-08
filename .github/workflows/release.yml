@@ -8,6 +8,16 @@ name: Release
 #   APPLE_ID                     Apple ID email used for notarization
 #   APPLE_TEAM_ID                10-character team id
 #   APPLE_APP_SPECIFIC_PASSWORD  app-specific password for that Apple ID
+#
+# Auto-update: each release carries latest-mac.json and latest.json, signed so the apps only install updates
+# made with these keys (see the README). Without them the release has no update files.
+#   RELAY_MAC_UPDATE_KEY         Ed25519 private key for macOS updates (scripts/sign-update.swift generate)
+#   TAURI_SIGNING_PRIVATE_KEY    Tauri updater private key for Windows updates (tauri signer generate)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password, if it has one
+#
+# Windows code signing through SignPath (free for open source), once the project is approved there:
+#   secret SIGNPATH_API_TOKEN, variable SIGNPATH_ORGANIZATION_ID, and optionally the variables
+#   SIGNPATH_PROJECT_SLUG (default relay) and SIGNPATH_SIGNING_POLICY_SLUG (default release-signing)
 
 on:
   push:
@@ -26,6 +36,7 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      RELAY_MAC_UPDATE_KEY: ${{ secrets.RELAY_MAC_UPDATE_KEY }}
     outputs:
       notarized: ${{ steps.notarize.outputs.done }}
     steps:
@@ -66,14 +77,36 @@ jobs:
           xcrun stapler validate "$DMG"
           echo "done=true" >> "$GITHUB_OUTPUT"
 
+      # After notarizing: stapling changes the DMG, and the signature must cover the final file.
+      - name: Sign the update
+        if: env.RELAY_MAC_UPDATE_KEY != ''
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SIG="$(swift scripts/sign-update.swift sign "build/Relay-$VERSION.dmg")"
+          cat > build/latest-mac.json <<JSON
+          {
+            "version": "$VERSION",
+            "url": "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/Relay-$VERSION.dmg",
+            "signature": "$SIG",
+            "notes": "Relay $VERSION"
+          }
+          JSON
+          cat build/latest-mac.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: build/Relay-*.dmg
+          path: |
+            build/Relay-*.dmg
+            build/latest-mac.json
           if-no-files-found: error
 
   windows:
     runs-on: windows-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
     defaults:
       run:
         shell: bash
@@ -102,10 +135,58 @@ jobs:
           cp target/release/bundle/nsis/*-setup.exe "../build/Relay-$VERSION-windows-x64-setup.exe"
           ls -la ../build
 
+      - name: Upload the unsigned installer for SignPath
+        id: unsigned
+        if: env.SIGNPATH_API_TOKEN != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-unsigned
+          path: build/Relay-*-windows-x64-setup.exe
+          if-no-files-found: error
+
+      - name: Code sign with SignPath
+        if: env.SIGNPATH_API_TOKEN != ''
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'relay' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: build/signed
+
+      - name: Use the signed installer
+        if: env.SIGNPATH_API_TOKEN != ''
+        run: |
+          cp ../build/signed/Relay-*-windows-x64-setup.exe ../build/
+          rm -rf ../build/signed
+
+      # Last, so the update signature covers the installer exactly as published (code signing changes it).
+      - name: Sign the update
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          FILE="Relay-$VERSION-windows-x64-setup.exe"
+          npx --yes @tauri-apps/cli@2.12.4 signer sign "../build/$FILE"
+          VERSION="$VERSION" FILE="$FILE" node -e '
+            const fs = require("fs");
+            const { VERSION, FILE, GITHUB_REPOSITORY, GITHUB_REF_NAME } = process.env;
+            const signature = fs.readFileSync("../build/" + FILE + ".sig", "utf8").trim();
+            const url = "https://github.com/" + GITHUB_REPOSITORY + "/releases/download/" + GITHUB_REF_NAME + "/" + FILE;
+            const latest = { version: VERSION, notes: "Relay " + VERSION, pub_date: new Date().toISOString(),
+              platforms: { "windows-x86_64": { signature, url } } };
+            fs.writeFileSync("../build/latest.json", JSON.stringify(latest, null, 2) + "\n");
+          '
+          rm "../build/$FILE.sig"
+          cat ../build/latest.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: build/Relay-*-windows-x64-setup.exe
+          path: |
+            build/Relay-*-windows-x64-setup.exe
+            build/latest.json
           if-no-files-found: error
 
   publish:
@@ -127,11 +208,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NOTARIZED: ${{ needs.macos.outputs.notarized }}
+          SIGNED_WINDOWS: ${{ secrets.SIGNPATH_API_TOKEN != '' && 'yes' || '' }}
         run: |
           NOTE="Unofficial tool, not affiliated with Anthropic. Download the .dmg for macOS or the -setup.exe for Windows."
           if [ "$NOTARIZED" != "true" ]; then
             NOTE="$NOTE The macOS build is not notarized: the first time, open it from System Settings > Privacy & Security > Open Anyway."
           fi
-          NOTE="$NOTE The Windows installer is not code signed, so SmartScreen may warn: click More info > Run anyway."
+          if [ -z "$SIGNED_WINDOWS" ]; then
+            NOTE="$NOTE The Windows installer is not code signed, so SmartScreen may warn: click More info > Run anyway."
+          fi
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
             --title "Relay $GITHUB_REF_NAME" --notes "$NOTE" --generate-notes

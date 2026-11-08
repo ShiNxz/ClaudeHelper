@@ -60,6 +60,20 @@ enum CLI {
                     case .signedIn(let a, let fresh): out(when + "  signed in to " + String(a.prefix(8)) + (fresh ? " (new sign-in)" : ""))
                     }
                 }
+            case "update-apply":
+                // Test of the update install steps on a copy: update-apply <dmg> <signature> <Relay.app> [--pubkey <base64>]
+                let rest = args.dropFirst().filter { !$0.hasPrefix("--") && $0 != value(args, "--pubkey") }
+                guard rest.count == 3 else { out("usage: update-apply <dmg> <signature> <path to a Relay.app copy> [--pubkey <base64>]"); return 2 }
+                let r = Array(rest)
+                let app = URL(fileURLWithPath: r[2])
+                let work = FileManager.default.temporaryDirectory.appendingPathComponent("relay-update-test-" + UUID().uuidString)
+                try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: work) }
+                let staged = try Updater.stage(dmg: URL(fileURLWithPath: r[0]), signature: r[1], publicKey: value(args, "--pubkey") ?? Updater.publicKey,
+                                               bundleId: Bundle(url: app)?.bundleIdentifier, nextTo: app, work: work)
+                let old = try Updater.swap(staged: staged, into: app)
+                let plist = NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist"))
+                out("installed \(plist?["CFBundleShortVersionString"] ?? "?") at \(app.path); old copy at \(old.path)")
             case "usage":
                 // Read-only: each account's latest plan usage from Claude's usage history.
                 let emails = TranscriptIndex.accountEmails(paths: paths)

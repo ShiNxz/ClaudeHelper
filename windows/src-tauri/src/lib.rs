@@ -24,6 +24,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 
 // MARK: State
 
@@ -39,6 +40,7 @@ struct Settings {
     sync_source: Option<String>,
     include_tools: bool,
     include_subagents: bool,
+    auto_update_check: bool,
 }
 
 impl Default for Settings {
@@ -53,6 +55,7 @@ impl Default for Settings {
             sync_source: None,
             include_tools: false,
             include_subagents: false,
+            auto_update_check: true,
         }
     }
 }
@@ -103,6 +106,20 @@ struct Inner {
     index_stats: index::Stats,
     index_cancel: Arc<AtomicBool>,
     index_restart: bool,
+    update: UpdateState,
+    /// The version Tauri was built with (the release tag), which the updater compares against.
+    app_version: String,
+}
+
+/// What the last update check found.
+#[derive(Clone, Debug, Default)]
+struct UpdateState {
+    version: Option<String>,
+    notes: Option<String>,
+    checking: bool,
+    error: Option<String>,
+    /// The version a notification was already shown for.
+    notified: Option<String>,
 }
 
 type Shared = Arc<Mutex<Inner>>;
@@ -247,7 +264,7 @@ impl Inner {
             format!("{} chats, {} messages indexed", self.index_stats.files, self.index_stats.messages)
         };
         json!({
-            "appVersion": env!("CARGO_PKG_VERSION"),
+            "appVersion": self.app_version,
             "platform": std::env::consts::OS,
             "claudeRunning": self.claude_running,
             "activeAccountId": self.active(),
@@ -270,6 +287,15 @@ impl Inner {
             },
             "paths": {
                 "data": self.paths.data_dir, "backups": self.paths.backups_dir(), "claude": self.paths.claude_dir,
+            },
+            "update": {
+                "current": self.app_version,
+                "available": self.update.version.is_some(),
+                "version": self.update.version,
+                "notes": self.update.notes,
+                "checking": self.update.checking,
+                "error": self.update.error,
+                "autoCheck": self.settings.auto_update_check,
             },
         })
     }
@@ -685,6 +711,7 @@ fn set_settings(
     sync_source: Option<String>,
     include_tools: Option<bool>,
     include_subagents: Option<bool>,
+    auto_update_check: Option<bool>,
 ) -> Value {
     let mut s = lock(&shared);
     let before = s.settings.clone();
@@ -698,6 +725,7 @@ fn set_settings(
     if let Some(v) = sync_source { set.sync_source = (!v.is_empty()).then_some(v); }
     if let Some(v) = include_tools { set.include_tools = v; }
     if let Some(v) = include_subagents { set.include_subagents = v; }
+    if let Some(v) = auto_update_check { set.auto_update_check = v; }
     s.settings.save(&s.paths);
     if s.settings.auto_switch_enabled != before.auto_switch_enabled {
         s.auto_status = None;
@@ -775,6 +803,78 @@ fn backup_now(shared: State<Shared>) -> Result<Value, String> {
     b.applied = true;
     let _ = backups::save(&b);
     Ok(json!({ "dir": b.dir, "files": b.files.len() }))
+}
+
+// MARK: Updates
+
+/// Ask GitHub for the latest release. The update is only offered when its signature matches the public
+/// key built into Relay; the updater checks that again before installing.
+async fn run_update_check(app: &AppHandle, shared: &Shared, from_background: bool) -> Result<(), String> {
+    {
+        let mut s = lock(shared);
+        if s.update.checking {
+            return Ok(());
+        }
+        s.update.checking = true;
+        s.update.error = None;
+    }
+    emit_state(app, false);
+    let result = match app.updater() {
+        Ok(u) => u.check().await.map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    let notify_version = {
+        let mut s = lock(shared);
+        s.update.checking = false;
+        match &result {
+            Ok(Some(u)) => {
+                s.update.version = Some(u.version.clone());
+                s.update.notes = u.body.clone();
+            }
+            Ok(None) => {
+                s.update.version = None;
+                s.update.notes = None;
+            }
+            // A failed background check stays quiet; a manual one shows why.
+            Err(e) => {
+                if !from_background {
+                    s.update.error = Some(format!("Could not check for updates: {e}"));
+                }
+            }
+        }
+        let v = s.update.version.clone().filter(|v| s.update.notified.as_ref() != Some(v));
+        if v.is_some() {
+            s.update.notified = v.clone();
+        }
+        v
+    };
+    emit_state(app, false);
+    if let Some(v) = notify_version.filter(|_| from_background) {
+        notify(app, "Relay update available", &format!("Relay {v} is ready to install. Open Relay and click Install."), false, false);
+    }
+    result.map(|_| ())
+}
+
+#[tauri::command]
+async fn check_update(app: AppHandle, shared: State<'_, Shared>) -> Result<Value, String> {
+    let shared = shared.inner().clone();
+    let _ = run_update_check(&app, &shared, false).await;
+    let state = lock(&shared).state();
+    Ok(state)
+}
+
+/// Download, check the signature, run the installer. On Windows Relay exits while the installer runs and is
+/// started again when it is done.
+#[tauri::command]
+async fn install_update(app: AppHandle, shared: State<'_, Shared>) -> Result<(), String> {
+    if lock(&shared).switching {
+        return Err("A switch is running. Install the update when it is done.".into());
+    }
+    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?
+        .ok_or("Relay is already up to date.")?;
+    let _ = app.emit("relay://toast", json!({ "title": "Updating Relay", "text": format!("Downloading Relay {}. Relay restarts when it is installed.", update.version), "warning": false }));
+    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
+    app.restart();
 }
 
 // MARK: Background work
@@ -1006,6 +1106,11 @@ fn rebuild_tray(app: &AppHandle) {
             m.append(&MenuItem::with_id(app, "accounts", "Manage Accounts...", true, None::<&str>)?)?;
         }
         m.append(&PredefinedMenuItem::separator(app)?)?;
+        if let Some(v) = &s.update.version {
+            m.append(&MenuItem::with_id(app, "update", format!("Install Relay {v}..."), !s.switching, None::<&str>)?)?;
+        } else {
+            m.append(&MenuItem::with_id(app, "update-check", "Check for Updates", !s.update.checking, None::<&str>)?)?;
+        }
         m.append(&MenuItem::with_id(app, "quit", "Quit Relay", true, None::<&str>)?)?;
         Ok(m)
     })();
@@ -1022,6 +1127,26 @@ fn on_menu(app: &AppHandle, id: &str) {
             let _ = app.emit("relay://navigate", if id == "search" { "search" } else { "accounts" });
         }
         "quit" => app.exit(0),
+        "update" => {
+            // Confirm and install from the window, where progress and errors show.
+            show_main(app);
+            let _ = app.emit("relay://navigate", "accounts");
+        }
+        "update-check" => {
+            let app = app.clone();
+            let Some(shared) = app.try_state::<Shared>().map(|s| s.inner().clone()) else { return };
+            thread::spawn(move || {
+                tauri::async_runtime::block_on(async {
+                    let ok = run_update_check(&app, &shared, false).await.is_ok();
+                    let (version, current) = { let s = lock(&shared); (s.update.version.clone(), s.app_version.clone()) };
+                    match (ok, version) {
+                        (true, Some(v)) => notify(&app, "Relay update available", &format!("Relay {v} is ready to install. Open Relay and click Install."), false, true),
+                        (true, None) => notify(&app, "Relay is up to date", &format!("You have the latest version, {current}."), false, true),
+                        (false, _) => notify(&app, "Could not check for updates", "GitHub could not be reached. Try again later.", true, true),
+                    }
+                });
+            });
+        }
         _ => {
             let Some(account) = id.strip_prefix("acct:").map(String::from) else { return };
             let app = app.clone();
@@ -1084,6 +1209,8 @@ pub fn run() {
         index_stats: index::stats(&paths.index_db()),
         index_cancel: Arc::new(AtomicBool::new(false)),
         index_restart: false,
+        update: UpdateState::default(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
         settings,
         paths,
     };
@@ -1095,11 +1222,12 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
             get_state, list_sessions, preview_edits, preview_pull, preview_sync, preview_restore, discard_plan, apply_plan,
             open_chat, reveal, switch_account, log_in_and_save, add_account, save_login, rename_profile, forget_profile,
-            set_settings, search, index_now, cancel_index, list_backups, backup_now
+            set_settings, search, index_now, cancel_index, list_backups, backup_now, check_update, install_update
         ])
         .on_window_event(|window, event| {
             // Closing the window keeps Relay running in the tray.
@@ -1110,6 +1238,7 @@ pub fn run() {
         })
         .setup(move |app| {
             let handle = app.handle().clone();
+            lock(&shared).app_version = app.package_info().version.to_string();
             let icon = app.default_window_icon().cloned().expect("app icon");
             TrayIconBuilder::with_id("main")
                 .icon(icon)
@@ -1138,6 +1267,20 @@ pub fn run() {
                 thread::spawn(move || loop {
                     start_indexing(&app2, &shared2);
                     thread::sleep(Duration::from_secs(600));
+                });
+                // Updates: a minute after start, then every 6 hours, while the setting is on.
+                let (app3, shared3) = (handle.clone(), shared.clone());
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_secs(60));
+                    loop {
+                        if lock(&shared3).settings.auto_update_check {
+                            let (a, s) = (app3.clone(), shared3.clone());
+                            tauri::async_runtime::block_on(async move {
+                                let _ = run_update_check(&a, &s, true).await;
+                            });
+                        }
+                        thread::sleep(Duration::from_secs(6 * 3600));
+                    }
                 });
             } else {
                 let paths = lock(&shared).paths.clone();

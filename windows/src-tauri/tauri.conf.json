@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Relay",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "identifier": "io.github.shinxz.relay",
   "build": {
     "frontendDist": "../ui"
@@ -25,15 +25,34 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Use several Claude accounts on one computer",
     "longDescription": "Relay switches the Claude desktop app between accounts, shows each account's 5-hour and weekly usage, can switch by itself when one runs low, and keeps your Code chats with you. Unofficial, not affiliated with Anthropic.",
     "copyright": "MIT License. Unofficial tool, not affiliated with Anthropic.",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "windows": {
       "nsis": {
         "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJCRTdGNjI5Nzk2N0Y3RTgKUldUbzkyZDVLZmJudTFJcTJhUWlOZ3hKc2R0U0VOVko1N0Rud3k5MXJrelUvYnhpeUdoRjhKWG4K",
+      "endpoints": [
+        "https://github.com/ShiNxz/Relay/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

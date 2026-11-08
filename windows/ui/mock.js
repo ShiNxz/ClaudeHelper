@@ -225,6 +225,8 @@
     return ok.length ? ok[0].id : null;
   }
 
+  const update = { available: true, version: "0.5.0", notes: "Relay updates itself now.", checking: false, error: null, autoCheck: true };
+
   function appState() {
     const idx = db.index;
     return {
@@ -248,6 +250,7 @@
         includeSubagents: idx.includeSubagents,
       },
       paths: { data: DATA, backups: DATA + "\\backups", claude: "C:\\Users\\you\\AppData\\Roaming\\Claude" },
+      update: Object.assign({ current: "0.4.0" }, update),
     };
   }
 
@@ -575,7 +578,13 @@
       if ("syncSource" in a) db.sync.source = a.syncSource ? a.syncSource : null;
       if ("includeTools" in a) db.index.includeTools = !!a.includeTools;
       if ("includeSubagents" in a) db.index.includeSubagents = !!a.includeSubagents;
+      if ("autoUpdateCheck" in a) update.autoCheck = !!a.autoUpdateCheck;
       return appState();
+    },
+    check_update: () => { update.checking = false; return appState(); },
+    install_update: () => {
+      emit("relay://toast", { title: "Updating Relay", text: "Downloading Relay " + update.version + ". Relay restarts when it is installed.", warning: false });
+      return null;
     },
     search,
     index_now: () => { indexNow(); return null; },

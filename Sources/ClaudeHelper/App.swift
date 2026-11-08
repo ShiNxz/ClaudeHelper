@@ -79,6 +79,24 @@ struct MenuContent: View {
             Button("Update Search Index") { model.startIndexing() }
         }
         Divider()
+        if let r = model.updater.available {
+            Button(model.updater.installing ? "Installing Relay \(r.version)..." : "Install Relay \(r.version)...") { model.updater.confirmAndInstall() }
+                .disabled(model.updater.installing)
+        } else {
+            Button(model.updater.checking ? "Checking for Updates..." : "Check for Updates...") {
+                Task { @MainActor in
+                    await model.updater.check(background: false)
+                    if let e = model.updater.error {
+                        model.notify(e, title: "Could not check for updates", warning: true, system: true)
+                    } else if model.updater.available == nil {
+                        model.notify("You have the latest version, \(model.updater.current).", title: "Relay is up to date", system: true)
+                    }
+                }
+            }
+            .disabled(model.updater.checking || !model.updater.canUpdate)
+        }
+        Toggle("Check for Updates Automatically", isOn: Binding(get: { model.updater.autoCheck }, set: { model.updater.autoCheck = $0 }))
+        Divider()
         Button("Quit \(AppInfo.name)") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
@@ -149,6 +167,15 @@ struct SidebarFooter: View {
                 ProgressView(value: model.indexProgress.fraction).controlSize(.small)
             }
             Text(model.indexStatusText).lineLimit(2)
+            if let r = model.updater.available {
+                HStack(spacing: 6) {
+                    Text("Relay \(r.version) is available").foregroundStyle(.primary)
+                    Button("Install") { model.updater.confirmAndInstall() }
+                        .controlSize(.small)
+                        .disabled(model.updater.installing)
+                }
+                .padding(.top, 4)
+            }
         }
         .font(.caption)
         .foregroundStyle(.secondary)

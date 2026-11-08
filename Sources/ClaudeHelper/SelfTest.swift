@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import HelperCore
 
@@ -183,9 +184,25 @@ enum SelfTest {
         try await profileTests(paths)
         try copyTests(base)
         try await freshLoginMergeTest(base)
+        updaterTests()
         try pullTests(base)
         try await carryTest(base)
         try usageTests(base)
+    }
+
+    /// Update checks: version order and the Ed25519 signature every update must carry.
+    static func updaterTests() {
+        check(Updater.isNewer("0.10.0", than: "0.9.9") && Updater.isNewer("v1.0", than: "0.9") && Updater.isNewer("0.4.1", than: "0.4"),
+              "update: newer versions recognized")
+        check(!Updater.isNewer("0.4.0", than: "0.4.0") && !Updater.isNewer("0.3.9", than: "0.4.0"), "update: same or older is not offered")
+        let key = Curve25519.Signing.PrivateKey()
+        let pub = key.publicKey.rawRepresentation.base64EncodedString()
+        let data = Data("Relay-0.5.0.dmg contents".utf8)
+        let sig = (try? key.signature(for: data))?.base64EncodedString() ?? ""
+        check(Updater.verify(data, signature: sig, publicKey: pub), "update: a correctly signed download passes")
+        check(!Updater.verify(data + Data([0]), signature: sig, publicKey: pub), "update: a changed download is refused")
+        check(!Updater.verify(data, signature: sig), "update: a download signed with another key is refused")
+        check(Data(base64Encoded: Updater.publicKey)?.count == 32, "update: the built-in public key is an Ed25519 key")
     }
 
     /// Pull: chosen chats copied into the signed-in account's chat lists, nothing else.
