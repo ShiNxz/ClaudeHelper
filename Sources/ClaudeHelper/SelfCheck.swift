@@ -13,6 +13,9 @@ enum SelfCheck {
 
     static var outputDir: URL? { arg("--snapshot").map { URL(fileURLWithPath: $0, isDirectory: true) } }
 
+    /// Filter the Sessions table starts with, so the check can show the chats this account lacks.
+    @MainActor static var sessionsFilter: StatusFilter?
+
     @MainActor
     static func run(model: AppModel, dir: URL) async {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -38,6 +41,23 @@ enum SelfCheck {
             model.planSheet = nil
             model.discardPending()
         }
+        // A chat the signed-in account lacks: opening it shows the pull preview, never Claude.
+        if let r = model.snapshot?.allSessions.first(where: { model.canPull($0) }) {
+            model.section = .search
+            sessionsFilter = .elsewhere
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            model.section = .sessions
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            capture(dir.appendingPathComponent("sessions-not-here.png"))
+            sessionsFilter = nil
+            model.open(r)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            capture(dir.appendingPathComponent("plan-pull.png"))
+            model.planSheet = nil
+        }
+        model.showToast(Toast(title: "Switched to someone@example.com", text: quoted("עיצוב חדש - Website redesign") + " is archived. It opens, but stays out of Claude's sidebar until you restore it.", warning: false))
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        capture(dir.appendingPathComponent("toast.png"))
         if let ids = arg("--sync") {
             model.previewSync(folderIds: ids.split(separator: ",").map(String.init))
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -73,7 +93,7 @@ enum SelfCheck {
 
     @MainActor
     static func capture(_ url: URL) {
-        guard let win = NSApp.windows.first(where: { $0.isVisible && $0.title == "Claude Helper" }) else { return }
+        guard let win = NSApp.windows.first(where: { $0.isVisible && $0.title == AppInfo.name }) else { return }
         let target = win.attachedSheet ?? win
         guard let view = target.contentView?.superview ?? target.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }

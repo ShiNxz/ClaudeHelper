@@ -39,7 +39,7 @@ public enum Executor {
         }
         guard !plan.changes.isEmpty else { throw HelperError.message("Nothing to apply.") }
         for c in plan.changes where !isAllowedTarget(c.target, paths: paths) {
-            throw HelperError.message("Refusing to touch \(c.target.path): outside the session files the helper manages.")
+            throw HelperError.message("Refusing to touch \(c.target.path): outside the session files Relay manages.")
         }
         if paths.isLiveSessionsRoot, ClaudeApp.isRunning() {
             throw HelperError.message("Claude is running. Quit it first or it will overwrite these files.")

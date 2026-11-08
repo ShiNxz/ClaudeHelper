@@ -33,6 +33,8 @@ struct PlanSheet: Identifiable {
     var plan: WritePlan
     var state: State = .preview
     var note: String?
+    /// Open this chat in Claude once the plan is applied (Pull and Open).
+    var openAfter: SessionRecord?
 }
 
 /// Main-queue blocks run in order, so a late index progress update can never land after the final one.
@@ -59,7 +61,8 @@ final class AppModel {
     var autoSelectFirstResult = false
     var snapshot: Snapshot?
     var claudeRunning = false
-    var banner: String?
+    /// Short message at the bottom of the window, gone after a few seconds.
+    var toast: Toast?
 
     /// Queued edits from the sessions browser, keyed by folderId|sessionId.
     var pending: [String: SessionEdit] = [:]
@@ -100,6 +103,33 @@ final class AppModel {
         didSet { UserDefaults.standard.set(nicknames, forKey: "folderNicknames") }
     }
 
+    // Usage and auto-switch
+    /// Latest plan usage per account id, from Claude's own usage history.
+    var usage: [String: AccountUsage] = [:]
+    /// True when the signed-in account's usage was sampled after it signed in (not left over from before).
+    var activeUsageIsCurrent = false
+    var autoSwitchEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(autoSwitchEnabled, forKey: "autoSwitch.enabled")
+            if autoSwitchEnabled { Notifier.shared.requestPermission() }
+            autoSwitchStatus = nil
+            autoSwitchWaitingSince = nil
+            if autoSwitchEnabled { refreshUsage() }
+        }
+    }
+    /// Percent of the 5-hour or weekly limit at which auto-switch moves on.
+    var autoSwitchThreshold: Int {
+        didSet { UserDefaults.standard.set(autoSwitchThreshold, forKey: "autoSwitch.threshold") }
+    }
+    var autoSwitchWaitForIdle: Bool {
+        didSet { UserDefaults.standard.set(autoSwitchWaitForIdle, forKey: "autoSwitch.waitForIdle") }
+    }
+    /// What auto-switch is waiting for, shown in Accounts and the menu.
+    var autoSwitchStatus: String?
+    private var autoSwitchWaitingSince: Date?
+    private var lastAutoSwitchAt: Date?
+    private var noCandidateNoticeAt: Date?
+
     init() {
         let d = UserDefaults.standard
         indexSettings = IndexSettings(includeToolOutput: d.bool(forKey: "index.tools"), includeSubagents: d.bool(forKey: "index.subagents"))
@@ -109,22 +139,58 @@ final class AppModel {
         syncSource = d.string(forKey: "syncSource")
         nicknames = d.dictionary(forKey: "folderNicknames") as? [String: String] ?? [:]
         switchSyncEnabled = d.bool(forKey: "switch.sync")
+        autoSwitchEnabled = d.bool(forKey: "autoSwitch.enabled")
+        let t = d.integer(forKey: "autoSwitch.threshold")
+        autoSwitchThreshold = (50...100).contains(t) ? t : 95
+        autoSwitchWaitForIdle = d.object(forKey: "autoSwitch.waitForIdle") as? Bool ?? true
+        Notifier.shared.setUp()
         refresh()
         loadIndexStats()
         startIndexing()
         timer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.startIndexing() }
         }
-        // The --snapshot self-check only looks; it must not save logins.
+        // The --snapshot self-check only looks; it must not save logins or switch.
         if SelfCheck.outputDir == nil {
             maintainProfiles()
+            refreshUsage()
             profileTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.maintainProfiles() }
+                Task { @MainActor in
+                    self?.maintainProfiles()
+                    self?.refreshUsage()
+                }
             }
+        } else {
+            usage = PlanUsage.accountUsage(paths: paths)
         }
     }
 
     private var profileTimer: Timer?
+
+    // MARK: Notices
+
+    /// Tell the user something. Inside the window when it is in front, otherwise as a macOS notification
+    /// (or the window toast when notifications are off). `system: true` always tries a notification, for
+    /// messages sent while another app comes to the front.
+    func notify(_ text: String, title: String? = nil, warning: Bool = false, system: Bool? = nil) {
+        let windowInFront = NSApp.isActive && NSApp.keyWindow?.title == AppInfo.name
+        if system ?? !windowInFront {
+            Notifier.shared.post(title: title ?? AppInfo.name, body: text) { [weak self] in
+                self?.showToast(Toast(title: title, text: text, warning: warning))
+            }
+        } else {
+            showToast(Toast(title: title, text: text, warning: warning))
+        }
+    }
+
+    func showToast(_ t: Toast) {
+        toast = t
+        let seconds: UInt64 = t.warning ? 10 : 6
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            if self.toast?.id == t.id { self.toast = nil }
+        }
+    }
 
     /// Keep the signed-in account's saved login current and flag saved logins that stopped working.
     /// Runs off the main thread; skipped while a switch is in progress.
@@ -145,10 +211,130 @@ final class AppModel {
                 self.profiles = list
                 if let r = refreshed, self.awaitingLogin == r.accountId || self.awaitingLogin == r.id {
                     self.awaitingLogin = nil
-                    self.banner = "Saved the login for \(self.email(forAccount: r.accountId) ?? r.name). You can switch to it from the menu bar now."
+                    self.notify("Saved the login for \(self.email(forAccount: r.accountId) ?? r.name). You can switch to it from the menu bar now.",
+                                title: "Login saved")
                 }
             }
         }
+    }
+
+    // MARK: Usage and auto-switch
+
+    private var usageWorkerActive = false
+
+    /// Read Claude's usage history off the main thread, then let auto-switch look at it.
+    func refreshUsage() {
+        guard !usageWorkerActive, SelfCheck.outputDir == nil else { return }
+        usageWorkerActive = true
+        let paths = self.paths
+        let threshold = autoSwitchThreshold
+        let watchIdle = autoSwitchEnabled && autoSwitchWaitForIdle
+        DispatchQueue.global(qos: .utility).async {
+            AccountHistory.noteCurrent(paths: paths)
+            let events = PlanUsage.timelineEvents(paths: paths)
+            let usage = PlanUsage.accountUsage(samples: PlanUsage.readSamples(paths: paths), events: events)
+            let active = paths.activeAccountId()
+            let activeUsage = active.flatMap { usage[$0] }
+            let current = activeUsage.map { PlanUsage.isCurrent($0, events: events) } ?? false
+            // When a switch is due, read the chat lists again (the last scan can be hours old) and look for
+            // chats of the signed-in account that are mid-turn. Terminal sessions are not stopped by a switch.
+            var fresh: Snapshot?
+            var busy: Set<String> = []
+            if current, let u = activeUsage, AutoSwitch.reason(u, threshold: threshold) != nil {
+                let snap = SessionScanner.scan(paths: paths)
+                fresh = snap
+                if watchIdle {
+                    let mine = Set(snap.folders.filter { $0.folder.accountId == active }.flatMap { $0.sessions.compactMap(\.cliSessionId) })
+                    busy = ChatActivity.busyTranscripts(paths: paths, among: mine)
+                }
+            }
+            onMainQueue {
+                self.usageWorkerActive = false
+                self.usage = usage
+                self.activeUsageIsCurrent = current
+                if let fresh { self.apply(fresh) }
+                self.evaluateAutoSwitch(busyChats: busy)
+            }
+        }
+    }
+
+    /// Recent chats of an account, newest first, one per chat.
+    func recentChats(ofAccount id: String, within seconds: TimeInterval) -> [SessionRecord] {
+        let cutoff = Date().addingTimeInterval(-seconds)
+        var best: [String: SessionRecord] = [:]
+        for f in snapshot?.folders ?? [] where f.folder.accountId == id && !f.folder.isBackupCopy {
+            for s in f.sessions {
+                let when = max(s.lastActivityAt ?? .distantPast, s.fileMTime)
+                guard when >= cutoff else { continue }
+                if let cur = best[s.sessionId], max(cur.lastActivityAt ?? .distantPast, cur.fileMTime) >= when { continue }
+                best[s.sessionId] = s
+            }
+        }
+        return best.values.sorted { max($0.lastActivityAt ?? .distantPast, $0.fileMTime) > max($1.lastActivityAt ?? .distantPast, $1.fileMTime) }
+    }
+
+    /// The account auto-switch would move to now, if any.
+    var autoSwitchPick: AccountEntry? {
+        let candidates = accountEntries.filter { !$0.isActive }.compactMap { e -> AutoSwitch.Candidate? in
+            guard let p = e.profile, !p.needsLogin else { return nil }
+            return AutoSwitch.Candidate(accountId: e.id, usage: usage[e.id])
+        }
+        guard let pick = AutoSwitch.pick(candidates, threshold: autoSwitchThreshold) else { return nil }
+        return accountEntries.first { $0.id == pick.accountId }
+    }
+
+    /// Called after each usage read. Switches when the signed-in account is at the threshold, Claude is running,
+    /// nothing else is going on, and (if asked) no chat of the signed-in account is still working.
+    func evaluateAutoSwitch(busyChats: Set<String>, now: Date = Date()) {
+        guard autoSwitchEnabled else { autoSwitchStatus = nil; return }
+        claudeRunning = ClaudeApp.isRunning()
+        guard !switching, claudeRunning,
+              let active = paths.activeAccountId(), let u = usage[active], activeUsageIsCurrent,
+              let why = AutoSwitch.reason(u, threshold: autoSwitchThreshold, now: now) else {
+            autoSwitchStatus = nil
+            autoSwitchWaitingSince = nil
+            return
+        }
+        let from = accountEntries.first { $0.id == active }?.title ?? "The signed-in account"
+        if planSheet != nil {
+            autoSwitchStatus = "\(from): \(why). Auto-switch waits while a preview is open here."
+            return
+        }
+        if let last = lastAutoSwitchAt, now.timeIntervalSince(last) < 600 {
+            autoSwitchStatus = "\(from): \(why). Waiting a few minutes after the last automatic switch before trying again."
+            return
+        }
+        guard let target = autoSwitchPick, let profile = target.profile else {
+            autoSwitchStatus = "\(from): \(why), and every other saved account is at \(autoSwitchThreshold)% or more. Staying on \(from)."
+            if noCandidateNoticeAt.map({ now.timeIntervalSince($0) > 3 * 3600 }) ?? true {
+                noCandidateNoticeAt = now
+                notify("\(from): \(why). Every other saved account is at \(autoSwitchThreshold)% or more too, so Claude stays on \(from).",
+                       title: "No account to switch to", warning: true)
+            }
+            return
+        }
+        if autoSwitchWaitForIdle {
+            let running = busyChats
+            if !running.isEmpty {
+                if autoSwitchWaitingSince == nil {
+                    autoSwitchWaitingSince = now
+                    notify("\(from): \(why). Switching to \(target.title) once \(running.count == 1 ? "the running chat finishes" : "\(running.count) running chats finish").",
+                           title: "Auto-switch is waiting")
+                }
+                autoSwitchStatus = "\(from): \(why). Will switch to \(target.title) once \(running.count == 1 ? "1 running chat finishes" : "\(running.count) running chats finish")."
+                return
+            }
+        }
+        autoSwitchStatus = nil
+        autoSwitchWaitingSince = nil
+        lastAutoSwitchAt = now
+        // Chats worked on in the last day come along to the new account, and the newest one opens again.
+        let recent = recentChats(ofAccount: active, within: 86400)
+        let targets = folderIds(forAccount: target.id)
+        let carry: WriteIntent? = recent.isEmpty || targets.isEmpty ? nil
+            : .pull(items: recent.map { PullItem(folderId: $0.folder.id, sessionId: $0.sessionId) }, targetFolderIds: targets)
+        switchTo(profile, carry: carry, openAfter: targets.isEmpty ? nil : recent.first,
+                 auto: "\(from) was switched away from because \(why).")
     }
 
     /// Profile (or account) the user was asked to log in to again; cleared once that login is saved.
@@ -162,14 +348,16 @@ final class AppModel {
     // MARK: Sessions
 
     func refresh() {
-        snapshot = SessionScanner.scan(paths: paths)
+        apply(SessionScanner.scan(paths: paths))
         profiles = LoginProfiles.list(paths: paths)
         claudeRunning = ClaudeApp.isRunning()
+    }
+
+    func apply(_ snap: Snapshot) {
+        snapshot = snap
         // Drop pending edits whose session vanished.
-        if let snap = snapshot {
-            let ids = Set(snap.allSessions.map(\.id))
-            pending = pending.filter { ids.contains($0.key) }
-        }
+        let ids = Set(snap.allSessions.map(\.id))
+        pending = pending.filter { ids.contains($0.key) }
     }
 
     func email(forAccount id: String?) -> String? { id.flatMap { accountEmails[$0] } }
@@ -222,16 +410,62 @@ final class AppModel {
         planSheet = PlanSheet(intent: intent, plan: Planner.plan(intent, paths: paths))
     }
 
+    /// Open a chat in Claude. A chat the signed-in account does not have goes through Pull first, because
+    /// Claude only opens chats of the account it is signed in to.
     func open(_ r: SessionRecord) {
+        if canPull(r) {
+            let who = accountEntries.first { $0.isActive }?.title ?? "the signed-in account"
+            previewPull([r], openAfter: r,
+                        note: "\(quoted(r.title)) is in \(label(r.folder)). Claude is signed in to \(who), so it cannot open it until it is added to \(who).")
+            return
+        }
+        openInClaude(r)
+    }
+
+    func openInClaude(_ r: SessionRecord) {
         guard let url = r.openURL else { return }
-        if let active = snapshot?.activeAccountId, r.folder.accountId != active {
-            banner = "\"\(r.title)\" is in \(label(r.folder)), but Claude is signed in to another account. It may not open. Account sync can copy it over."
-        } else if r.isArchived {
-            banner = "\"\(r.title)\" is archived. It opens, but it stays out of the sidebar until you restore it."
-        } else {
-            banner = nil
+        if r.isArchived {
+            notify("\(quoted(r.title)) is archived. It opens, but stays out of Claude's sidebar until you restore it.", system: true)
         }
         NSWorkspace.shared.open(url)
+    }
+
+    // MARK: Pull
+
+    /// Folders (one per organization) the signed-in account keeps its chats in.
+    var signedInFolderIds: [String] {
+        guard let active = snapshot?.activeAccountId else { return [] }
+        return folderIds(forAccount: active)
+    }
+
+    /// Chat ids the signed-in account already has.
+    var signedInChatIds: Set<String> {
+        guard let active = snapshot?.activeAccountId else { return [] }
+        return Set((snapshot?.folders ?? []).filter { $0.folder.accountId == active && !$0.folder.isBackupCopy }.flatMap { $0.sessions.map(\.sessionId) })
+    }
+
+    /// True for a chat in another account (or a backup copy) that the signed-in account does not have.
+    func canPull(_ r: SessionRecord, have: Set<String>? = nil) -> Bool {
+        guard let active = snapshot?.activeAccountId, !signedInFolderIds.isEmpty else { return false }
+        if r.folder.accountId == active && !r.folder.isBackupCopy { return false }
+        return !(have ?? signedInChatIds).contains(r.sessionId)
+    }
+
+    func previewPull(_ records: [SessionRecord], openAfter: SessionRecord? = nil, note: String? = nil) {
+        let have = signedInChatIds
+        let items = records.filter { canPull($0, have: have) }.map { PullItem(folderId: $0.folder.id, sessionId: $0.sessionId) }
+        guard !items.isEmpty else { return }
+        let intent = WriteIntent.pull(items: items, targetFolderIds: signedInFolderIds)
+        planSheet = PlanSheet(intent: intent, plan: Planner.plan(intent, paths: paths), note: note, openAfter: openAfter)
+    }
+
+    /// Open a chat once Claude has had a moment to start.
+    func openWhenClaudeIsUp(_ r: SessionRecord) {
+        Task { @MainActor in
+            for _ in 0..<20 where !ClaudeApp.isRunning() { try? await Task.sleep(nanoseconds: 500_000_000) }
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            self.openInClaude(r)
+        }
     }
 
     func copy(_ text: String) {
@@ -308,6 +542,7 @@ final class AppModel {
                 case .applied(let result, let reopened):
                     if case .edits = intent { self.pending = [:] }
                     self.update(sheetId) { $0.state = .done(result, reopened: reopened, steps: self.steps(of: $0)) }
+                    if let r = self.planSheet?.openAfter, self.planSheet?.id == sheetId { self.openWhenClaudeIsUp(r) }
                 case .planChanged(let newPlan):
                     self.update(sheetId) {
                         $0.plan = newPlan
@@ -353,6 +588,7 @@ final class AppModel {
         let email: String?
         let profile: LoginProfile?
         let isActive: Bool
+        let usage: AccountUsage?
         var title: String { email ?? profile?.name ?? "Account " + String(id.prefix(8)) }
         /// The saved name, shown only when it says something the email does not.
         var nickname: String? { profile.flatMap { $0.name == email ? nil : $0.name } }
@@ -367,7 +603,7 @@ final class AppModel {
         for p in profiles { add(p.accountId) }
         let active = snapshot?.activeAccountId
         return ids.map { id in
-            AccountEntry(id: id, email: accountEmails[id], profile: profiles.first { $0.accountId == id }, isActive: id == active)
+            AccountEntry(id: id, email: accountEmails[id], profile: profiles.first { $0.accountId == id }, isActive: id == active, usage: usage[id])
         }.sorted { a, b in
             if a.isActive != b.isActive { return a.isActive }
             return a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
@@ -385,9 +621,9 @@ final class AppModel {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let p = try LoginProfiles.saveCurrent(name: trimmed.isEmpty ? "Account" : trimmed, paths: paths)
-            banner = "Saved the current Claude login as \(p.name)."
+            notify("Saved the current Claude login as \(p.name).", title: "Login saved")
         } catch {
-            banner = error.localizedDescription
+            notify(error.localizedDescription, title: "Could not save the login", warning: true)
         }
         refresh()
     }
@@ -400,7 +636,7 @@ final class AppModel {
     func deleteProfile(_ p: LoginProfile) {
         let alert = NSAlert()
         alert.messageText = "Forget the saved login for \(email(forAccount: p.accountId) ?? p.name)?"
-        alert.informativeText = "Only the helper's saved copy is removed. Claude, the account and your chats are not touched. You can log in and save it again later."
+        alert.informativeText = "Only Relay's saved copy is removed. Claude, the account and your chats are not touched. You can log in and save it again later."
         alert.addButton(withTitle: "Forget")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
@@ -443,9 +679,9 @@ final class AppModel {
                 let r = try await LoginProfiles.prepareFreshLogin(paths: paths, syncFolderIds: self.switchSyncEnabled ? self.syncFolderIds : nil) { step in
                     onMainQueue { self.switchSteps.append(step) }
                 }
-                self.banner = r.notes.joined(separator: " ")
+                self.notify(r.notes.joined(separator: " "), title: "Claude is signed out", system: true)
             } catch {
-                self.banner = error.localizedDescription
+                self.notify(error.localizedDescription, title: "Could not add an account", warning: true)
             }
             self.switching = false
             self.refresh()
@@ -462,7 +698,7 @@ final class AppModel {
         guard !switching else { return }
         let alert = NSAlert()
         alert.messageText = "Log in to \(who)?"
-        var info = "The current login is saved first. Claude quits, which stops any running Code sessions, and reopens signed out. Log in to \(who) there. The helper saves that login by itself within a minute, and from then on you can switch to it from the menu bar."
+        var info = "The current login is saved first. Claude quits, which stops any running Code sessions, and reopens signed out. Log in to \(who) there. Relay saves that login by itself within a minute, and from then on you can switch to it from the menu bar."
         if switchSyncEnabled, syncFolderIds.count >= 2 { info += " Chats are merged between the accounts picked in Sync chats first." }
         alert.informativeText = info
         alert.addButton(withTitle: "Continue")
@@ -478,39 +714,51 @@ final class AppModel {
                 _ = try await LoginProfiles.prepareFreshLogin(paths: paths, syncFolderIds: self.switchSyncEnabled ? self.syncFolderIds : nil) { step in
                     onMainQueue { self.switchSteps.append(step) }
                 }
-                self.banner = "Claude is signed out. Log in to \(who) there. The helper saves it by itself once you are in."
+                self.notify("Log in to \(who) in Claude. Relay saves it by itself once you are in.", title: "Claude is signed out", system: true)
             } catch {
-                self.banner = error.localizedDescription
+                self.notify(error.localizedDescription, title: "Could not log in to \(who)", warning: true)
             }
             self.switching = false
             self.refresh()
         }
     }
 
-    func switchTo(_ p: LoginProfile) {
+    /// Switch Claude to a saved login. `carry` brings chats along first, `openAfter` opens a chat once Claude is
+    /// back, and `auto` (the reason) marks an automatic switch, which reports by notification instead of alerts.
+    func switchTo(_ p: LoginProfile, carry: WriteIntent? = nil, openAfter: SessionRecord? = nil, auto: String? = nil) {
         switching = true
         switchSteps = []
         let paths = self.paths
         let sync: [String]? = switchSyncEnabled ? syncFolderIds : nil
+        let who = email(forAccount: p.accountId) ?? p.name
         Task { @MainActor in
-            var message: String
+            var notes: [String] = []
             var warnings: [String] = []
+            var switched = false
             do {
-                let r = try await LoginProfiles.switchTo(p, syncFolderIds: sync, paths: paths) { step in
+                let r = try await LoginProfiles.switchTo(p, syncFolderIds: sync, carry: carry, paths: paths) { step in
                     onMainQueue { self.switchSteps.append(step) }
                 }
                 warnings = r.warnings
-                message = r.notes.joined(separator: " ")
+                notes = r.notes
+                switched = r.switched
             } catch {
-                message = error.localizedDescription
-                warnings = [message]
+                warnings = [error.localizedDescription]
             }
             self.switching = false
             self.refresh()
-            self.banner = message
-            if !warnings.isEmpty {
+            self.refreshUsage()
+            if switched, let r = openAfter, let r2 = self.snapshot?.allSessions.first(where: { $0.sessionId == r.sessionId && $0.folder.accountId == p.accountId }) {
+                self.openWhenClaudeIsUp(r2)
+            }
+            let body = ([auto].compactMap { $0 } + notes).joined(separator: " ")
+            if auto != nil || warnings.isEmpty {
+                let extra = warnings.isEmpty ? "" : " " + warnings.joined(separator: " ")
+                self.notify(body + extra, title: switched ? "Switched to \(who)" : "Could not switch to \(who)",
+                            warning: !warnings.isEmpty, system: true)
+            } else {
                 let alert = NSAlert()
-                alert.messageText = "Could not switch to \(p.name)"
+                alert.messageText = switched ? "Switched to \(who), with a problem" : "Could not switch to \(who)"
                 alert.informativeText = warnings.joined(separator: "\n\n")
                 NSApp.activate(ignoringOtherApps: true)
                 alert.runModal()
@@ -572,16 +820,16 @@ final class AppModel {
     }
 
     /// Back up every live account folder right now, without changing anything.
-    func backupNow() -> String {
+    func backupNow() -> (ok: Bool, text: String) {
         let folders = (snapshot?.folders ?? []).map(\.folder).filter { !$0.isBackupCopy }
         do {
             let b = try BackupManager.create(folders: folders, reason: "manual", title: "Manual backup", changes: [], paths: paths)
             var info = b
             info.applied = true
             try? BackupManager.save(info)
-            return "Backed up \(b.files.count) files to \(b.dir.lastPathComponent)"
+            return (true, "Saved \(b.files.count) files to \(b.dir.lastPathComponent).")
         } catch {
-            return "Backup failed: " + error.localizedDescription
+            return (false, error.localizedDescription)
         }
     }
 

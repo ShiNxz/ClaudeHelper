@@ -1,10 +1,10 @@
 #!/bin/bash
-# Builds "Claude Helper.app" into ./build and signs it.
+# Builds "Relay.app" into ./build and signs it.
 #
 #   ./bundle.sh               build for this Mac's architecture
 #   ./bundle.sh --universal   build arm64 + x86_64 and merge them with lipo
-#   ./bundle.sh --dmg         also make build/Claude-Helper-<version>.dmg
-#   ./bundle.sh --install     also copy the app to /Applications
+#   ./bundle.sh --dmg         also make build/Relay-<version>.dmg
+#   ./bundle.sh --install     also copy the app to /Applications (replaces an older "Claude Helper.app")
 #
 # Environment:
 #   VERSION        version string, default the latest git tag (a leading "v" is dropped, so tags work)
@@ -18,8 +18,11 @@ VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)}
 VERSION="${VERSION#v}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+# The bundle id and the data folder (~/Library/Application Support/ClaudeHelper) keep the old name,
+# so saved logins and settings carry over from Claude Helper.
 BUNDLE_ID="io.github.shinxz.ClaudeHelper"
-APP="build/Claude Helper.app"
+NAME="Relay"
+APP="build/$NAME.app"
 
 UNIVERSAL=0; DMG=0; INSTALL=0
 for arg in "$@"; do
@@ -52,7 +55,7 @@ fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN" "$APP/Contents/MacOS/ClaudeHelper"
+cp "$BIN" "$APP/Contents/MacOS/$NAME"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -61,12 +64,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key><string>en</string>
-  <key>CFBundleExecutable</key><string>ClaudeHelper</string>
+  <key>CFBundleExecutable</key><string>${NAME}</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>Claude Helper</string>
-  <key>CFBundleDisplayName</key><string>Claude Helper</string>
+  <key>CFBundleName</key><string>${NAME}</string>
+  <key>CFBundleDisplayName</key><string>${NAME}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
@@ -85,15 +88,15 @@ else
   codesign --force --sign "$SIGN_IDENTITY" --options runtime --timestamp "$APP"
 fi
 codesign --verify --strict --verbose=1 "$APP"
-echo "Built $(pwd)/$APP ($(lipo -archs "$APP/Contents/MacOS/ClaudeHelper"), version $VERSION)"
+echo "Built $(pwd)/$APP ($(lipo -archs "$APP/Contents/MacOS/$NAME"), version $VERSION)"
 
 if [ "$DMG" = 1 ]; then
-  DMG_PATH="build/Claude-Helper-$VERSION.dmg"
+  DMG_PATH="build/$NAME-$VERSION.dmg"
   STAGE="$(mktemp -d)"
   cp -R "$APP" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
   rm -f "$DMG_PATH"
-  hdiutil create -volname "Claude Helper" -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null
+  hdiutil create -volname "$NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null
   rm -rf "$STAGE"
   if [ "$SIGN_IDENTITY" != "-" ]; then
     codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
@@ -102,27 +105,33 @@ if [ "$DMG" = 1 ]; then
 fi
 
 if [ "$INSTALL" = 1 ]; then
-  # The pattern has no space, so it never matches Claude's own "Claude Helper" processes.
-  PATTERN="Claude Helper.app/Contents/MacOS/ClaudeHelper"
+  # This app, or the same app under its old name. Claude's own helper processes run ".../MacOS/Claude Helper"
+  # (with a space), so the old-name pattern never matches them.
+  PATTERN="($NAME\.app/Contents/MacOS/$NAME|Claude Helper\.app/Contents/MacOS/ClaudeHelper)"
   WAS_RUNNING=0
   if pgrep -f "$PATTERN" >/dev/null; then
     WAS_RUNNING=1
-    echo "Quitting the running Claude Helper"
+    echo "Quitting the running $NAME"
     pkill -TERM -f "$PATTERN" || true
     for _ in $(seq 1 20); do
       pgrep -f "$PATTERN" >/dev/null || break
       sleep 0.5
     done
     if pgrep -f "$PATTERN" >/dev/null; then
-      echo "Claude Helper did not quit. Quit it from its menu bar icon and run this again." >&2
+      echo "$NAME did not quit. Quit it from its menu bar icon and run this again." >&2
       exit 1
     fi
   fi
-  rm -rf "/Applications/Claude Helper.app"
+  # The same app under its old name: two copies with one bundle id confuse Launch Services.
+  if [ -f "/Applications/Claude Helper.app/Contents/MacOS/ClaudeHelper" ]; then
+    rm -rf "/Applications/Claude Helper.app"
+    echo "Removed /Applications/Claude Helper.app (the old name of this app)"
+  fi
+  rm -rf "/Applications/$NAME.app"
   cp -R "$APP" /Applications/
-  echo "Installed /Applications/Claude Helper.app"
+  echo "Installed /Applications/$NAME.app"
   if [ "$WAS_RUNNING" = 1 ]; then
-    open "/Applications/Claude Helper.app"
-    echo "Reopened Claude Helper"
+    open "/Applications/$NAME.app"
+    echo "Reopened $NAME"
   fi
 fi

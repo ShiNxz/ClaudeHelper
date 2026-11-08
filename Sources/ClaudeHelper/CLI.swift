@@ -14,7 +14,7 @@ enum CLI {
         let args = Array(argv.drop { $0 != "--cli" }.dropFirst())
         guard let cmd = args.first else {
             out("""
-            usage: ClaudeHelper --cli <command>
+            usage: \(URL(fileURLWithPath: CommandLine.arguments[0]).lastPathComponent) --cli <command>
               selftest                             run the built-in tests against temp fixtures
               scan                                 list folders and sessions
               accounts                             account folders with the email each belongs to (from the index)
@@ -24,6 +24,8 @@ enum CLI {
               edit --folder <acct/org> --session <local_id> [--restore|--archive|--pin|--unpin|--title T] [--apply]
               sync <acct/org> <acct/org> ... [--apply]
               copy <acct/org,...> <acct/org,...> [--apply]   one way, from the first list into the second
+              pull <acct/org> <local_id,...> [--into <acct/org,...>] [--apply]   copy chosen chats into the signed-in account
+              usage                                each account's 5-hour and weekly use, from Claude's usage history
               backup [<acct/org> ...]              back up folders now (default: all live folders), changes nothing
               backups
               restore-backup <backup id> [--apply]
@@ -57,6 +59,27 @@ enum CLI {
                     case .signedOut(let from): out(when + "  signed out" + (from.map { " of " + String($0.prefix(8)) } ?? ""))
                     case .signedIn(let a, let fresh): out(when + "  signed in to " + String(a.prefix(8)) + (fresh ? " (new sign-in)" : ""))
                     }
+                }
+            case "usage":
+                // Read-only: each account's latest plan usage from Claude's usage history.
+                let emails = TranscriptIndex.accountEmails(paths: paths)
+                let events = PlanUsage.timelineEvents(paths: paths)
+                let samples = PlanUsage.readSamples(paths: paths)
+                let attributed = PlanUsage.attribute(samples, events: events)
+                out("\(samples.count) samples, \(attributed.count) matched to an account, \(events.count) sign-in events in the log")
+                let now = Date()
+                func pct(_ v: Int?) -> String { v.map { "\($0)%" } ?? "-" }
+                func when(_ d: Date?) -> String { d.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "-" }
+                let snap = SessionScanner.scan(paths: paths)
+                let mine = snap.folders.filter { $0.folder.accountId == snap.activeAccountId }.flatMap(\.sessions)
+                let busy = ChatActivity.busyTranscripts(paths: paths, among: Set(mine.compactMap(\.cliSessionId)))
+                let busyTitles = Set(mine.filter { $0.cliSessionId.map(busy.contains) ?? false }.map(\.title))
+                out("chats of the signed-in account mid-turn now: \(busy.count)" + (busyTitles.isEmpty ? "" : " (" + busyTitles.sorted().joined(separator: ", ") + ")"))
+                for (id, u) in PlanUsage.accountUsage(samples: samples, events: events).sorted(by: { $0.key < $1.key }) {
+                    out("\(emails[id] ?? String(id.prefix(8)))  org \(u.org.prefix(8))  sampled \(when(u.sampledAt))")
+                    out("  5-hour \(pct(u.fiveHour)) then, \(pct(u.fiveHourNow(now))) now, resets by \(when(u.fiveHourReset(now)))")
+                    out("  week   \(pct(u.sevenDay)) then, \(pct(u.sevenDayNow(now))) now, resets by \(when(u.weekReset(now)))"
+                        + (PlanUsage.isCurrent(u, events: events) ? "" : "  (from before the latest sign-in)"))
                 }
             case "accounts":
                 let emails = TranscriptIndex.accountEmails(paths: paths)
@@ -121,6 +144,21 @@ enum CLI {
                 let src = rest[rest.startIndex].split(separator: ",").map(String.init)
                 let dst = rest[rest.startIndex + 1].split(separator: ",").map(String.init)
                 return try await planAndMaybeApply(.copy(sourceFolderIds: src, targetFolderIds: dst), paths: paths, args: args)
+            case "pull":
+                let rest = Array(args.dropFirst().filter { !$0.hasPrefix("--") })
+                guard rest.count >= 2 else { out("usage: pull <acct/org> <local_id,...> [--into <acct/org,...>] [--apply]"); return 2 }
+                let into: [String]
+                if let v = value(args, "--into") {
+                    into = v.split(separator: ",").map(String.init)
+                } else {
+                    // Same as the app: the signed-in account's chat lists that are in use, or all of them when none is.
+                    let active = paths.activeAccountId()
+                    let live = SessionScanner.listFolders(root: paths.sessionsRoot).filter { $0.accountId == active && !$0.isBackupCopy }
+                    let used = live.filter { let s = SessionScanner.scanFolder($0); return !s.sessions.isEmpty || !s.deletedMarkers.isEmpty }
+                    into = (used.isEmpty ? live : used).map(\.id)
+                }
+                let items = rest[1].split(separator: ",").map { PullItem(folderId: rest[0], sessionId: String($0)) }
+                return try await planAndMaybeApply(.pull(items: items, targetFolderIds: into), paths: paths, args: args)
             case "sync":
                 let ids = args.dropFirst().filter { !$0.hasPrefix("--") }
                 return try await planAndMaybeApply(.sync(folderIds: Array(ids)), paths: paths, args: args)

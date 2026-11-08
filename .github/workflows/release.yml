@@ -51,12 +51,12 @@ jobs:
         run: ./bundle.sh --universal --dmg
 
       - name: Self-test
-        run: '"build/Claude Helper.app/Contents/MacOS/ClaudeHelper" --cli selftest'
+        run: '"build/Relay.app/Contents/MacOS/Relay" --cli selftest'
 
       - name: Notarize and staple
         if: env.SIGN_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != ''
         run: |
-          DMG="$(ls build/Claude-Helper-*.dmg)"
+          DMG="$(ls build/Relay-*.dmg)"
           xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
           xcrun stapler staple "$DMG"
@@ -65,7 +65,7 @@ jobs:
       - name: Checksum
         run: |
           cd build
-          shasum -a 256 Claude-Helper-*.dmg > SHA256SUMS.txt
+          shasum -a 256 Relay-*.dmg > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Publish GitHub Release
@@ -76,5 +76,5 @@ jobs:
           if [ -z "${SIGN_IDENTITY:-}" ]; then
             NOTE="$NOTE This build is not notarized: the first time, open it from System Settings > Privacy & Security > Open Anyway (see the README)."
           fi
-          gh release create "$GITHUB_REF_NAME" build/Claude-Helper-*.dmg build/SHA256SUMS.txt \
-            --title "Claude Helper $GITHUB_REF_NAME" --notes "$NOTE" --generate-notes
+          gh release create "$GITHUB_REF_NAME" build/Relay-*.dmg build/SHA256SUMS.txt \
+            --title "Relay $GITHUB_REF_NAME" --notes "$NOTE" --generate-notes

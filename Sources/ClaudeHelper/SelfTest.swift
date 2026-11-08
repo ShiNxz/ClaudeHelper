@@ -183,6 +183,145 @@ enum SelfTest {
         try await profileTests(paths)
         try copyTests(base)
         try await freshLoginMergeTest(base)
+        try pullTests(base)
+        try await carryTest(base)
+        try usageTests(base)
+    }
+
+    /// Pull: chosen chats copied into the signed-in account's chat lists, nothing else.
+    static func pullTests(_ base: URL) throws {
+        let paths = HelperPaths(sessionsRoot: base.appendingPathComponent("pull-sessions"),
+                                claudeConfig: base.appendingPathComponent("pull/config.json"),
+                                projectsRoot: base.appendingPathComponent("projects"),
+                                dataDir: base.appendingPathComponent("pull-data"),
+                                claudeLog: base.appendingPathComponent("pull.log"))
+        let other = paths.sessionsRoot.appendingPathComponent("acct-o/org-1")
+        let me1 = paths.sessionsRoot.appendingPathComponent("acct-m/org-1"), me2 = paths.sessionsRoot.appendingPathComponent("acct-m/org-2")
+        try write(session("p1", title: "Wanted", archived: false, cli: "kp1"), other.appendingPathComponent("local_p1.json"))
+        try write(session("p2", title: "Wanted archived", archived: true, cli: "kp2"), other.appendingPathComponent("local_p2.json"))
+        try write(session("p3", title: "Not picked", archived: false, cli: "kp3"), other.appendingPathComponent("local_p3.json"))
+        try write(session("p4", title: "Newer here", archived: false, cli: "kp4"), other.appendingPathComponent("local_p4.json"))
+        try setMTime(other.appendingPathComponent("local_p4.json"), 3600)
+        try write(session("p4", title: "Newer here, mine", archived: false, cli: "kp4"), me1.appendingPathComponent("local_p4.json"))
+        try write("1", me2.appendingPathComponent("deleted_p1"))
+        try write("{\"v\":1,\"archived\":[]}", me1.appendingPathComponent("archived-sessions.idx"))
+        let otherBefore = contents(other)
+        let items = ["local_p1", "local_p2", "local_p4"].map { PullItem(folderId: "acct-o/org-1", sessionId: $0) }
+        let plan = Planner.plan(.pull(items: items, targetFolderIds: ["acct-m/org-1", "acct-m/org-2"]), paths: paths)
+        check(plan.canApply && !plan.changes.contains { $0.folder.accountId == "acct-o" }, "pull: plan never writes the account pulled from")
+        _ = try Executor.apply(plan, paths: paths)
+        let m1 = contents(me1), m2 = contents(me2)
+        check(contents(other) == otherBefore, "pull: source folder unchanged")
+        check(m1["local_p1.json"] != nil && m2["local_p1.json"] != nil && m1["local_p2.json"] != nil, "pull: picked chats added to every chat list of the account")
+        check(m1["local_p3.json"] == nil && m2["local_p3.json"] == nil, "pull: chats that were not picked stay out")
+        check(String(decoding: m1["local_p4.json"]!, as: UTF8.self).contains("mine"), "pull: a newer copy already in the account is kept")
+        check(m2["deleted_p1"] == nil, "pull: a deleted marker for a pulled chat is moved to the backup")
+        check(SchemaGuard.parseArchivedIndex(m1["archived-sessions.idx"]!).ids == ["local_p2"], "pull: archived list follows the pulled chats")
+        check(Planner.plan(.pull(items: items, targetFolderIds: ["acct-m/org-1", "acct-m/org-2"]), paths: paths).changes.isEmpty,
+              "pull: pulling again has nothing to do")
+        check(!Planner.plan(.pull(items: items, targetFolderIds: []), paths: paths).problems.isEmpty, "pull: no chat list to pull into is refused")
+    }
+
+    /// Switching with chats to bring along: they are copied while Claude is closed, before the login swap.
+    static func carryTest(_ base: URL) async throws {
+        let paths = HelperPaths(sessionsRoot: base.appendingPathComponent("carry-sessions"),
+                                claudeConfig: base.appendingPathComponent("carry/config.json"),
+                                projectsRoot: base.appendingPathComponent("projects"),
+                                dataDir: base.appendingPathComponent("carry-data"),
+                                claudeLog: base.appendingPathComponent("carry.log"))
+        let from = paths.sessionsRoot.appendingPathComponent("acct-f/org-1"), to = paths.sessionsRoot.appendingPathComponent("acct-t/org-1")
+        try write(session("w1", title: "Working on this", archived: false, cli: "kw1"), from.appendingPathComponent("local_w1.json"))
+        try fm.createDirectory(at: to, withIntermediateDirectories: true)
+        try fakeLogin(paths, account: "acct-t", token: "T", marker: "marker-t")
+        let target = try LoginProfiles.saveCurrent(name: "Target", paths: paths)
+        try fakeLogin(paths, account: "acct-f", token: "F", marker: "marker-f")
+        let carry = WriteIntent.pull(items: [PullItem(folderId: "acct-f/org-1", sessionId: "local_w1")], targetFolderIds: ["acct-t/org-1"])
+        let r = try await LoginProfiles.switchTo(target, syncFolderIds: nil, carry: carry, paths: paths, step: { _ in })
+        check(r.switched && fm.fileExists(atPath: to.appendingPathComponent("local_w1.json").path) && r.carryBackup != nil,
+              "switch: chats brought along to the new account, backed up first")
+        check(AccountHistory.events(paths: paths).last?.kind == .signedIn(account: "acct-t", wasSignedOut: false),
+              "switch: the new account is noted in the helper's account history")
+        check(LoginProfiles.loginSwapDates(paths: paths).count == 1, "switch: login swap time read back from the backup name")
+    }
+
+    static func usageTests(_ base: URL) throws {
+        let json = #"{"version":2,"samples":[{"org":"org-x","t":1700000000000,"u":{"fh":10,"sd":40}},{"org":"org-y","t":1700000600000,"u":{"sd":7}},{"org":"org-x","t":1700001200000,"u":{"fh":12.6,"sd":41,"xu":0}},{"bad":1}]}"#
+        let samples = PlanUsage.parseSamples(Data(json.utf8))
+        check(samples.count == 3 && samples[1].fiveHour == nil && samples[2].fiveHour == 13 && samples[2].date == Date(timeIntervalSince1970: 1_700_001_200),
+              "usage: history parsed, missing 5-hour window kept as none, percent rounded")
+
+        // Who was signed in when: x until a swap the log did not show, then y.
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        func sample(_ org: String, _ minutes: Double, _ fh: Int?, _ sd: Int?) -> UsageSample {
+            UsageSample(org: org, date: t0.addingTimeInterval(minutes * 60), fiveHour: fh, sevenDay: sd)
+        }
+        let events = [LoginEvent(date: t0.addingTimeInterval(-60), kind: .signedIn(account: "acct-x", wasSignedOut: true)),
+                      LoginEvent(date: t0.addingTimeInterval(100 * 60), kind: .signedOut(from: nil)),
+                      LoginEvent(date: t0.addingTimeInterval(300 * 60), kind: .signedIn(account: "acct-y", wasSignedOut: true))]
+        let list = [sample("org-x", 0, 5, 20), sample("org-x", 30, 8, 22), sample("org-x", 150, 30, 50), sample("org-y", 301, nil, 70)]
+        let attributed = PlanUsage.attribute(list, events: events)
+        check(attributed.map(\.account) == ["acct-x", "acct-x", "acct-x", "acct-y"],
+              "usage: samples matched by who was signed in, and by organization after an unlogged swap")
+
+        // Five-hour window: reset by five hours after the window's first sample; weekly anchor from a drop.
+        let x = [sample("org-x", 0, 0, 90), sample("org-x", 30, 10, 95), sample("org-x", 60, 20, 2), sample("org-x", 90, 40, 5)]
+        let u = PlanUsage.accountUsage(samples: x, events: [events[0]])["acct-x"]!
+        check(u.fiveHour == 40 && u.fiveHourResetsBy == t0.addingTimeInterval(30 * 60 + 5 * 3600), "usage: 5-hour reset bound from the window's first sample")
+        check(u.weekAnchor == t0.addingTimeInterval(60 * 60), "usage: weekly reset found where the weekly figure dropped")
+        let later = t0.addingTimeInterval(90 * 60)
+        check(u.fiveHourNow(later.addingTimeInterval(60)) == 40 && u.fiveHourNow(later.addingTimeInterval(6 * 3600)) == 0, "usage: 5-hour use counts as 0 once its window passed")
+        check(u.sevenDayNow(later.addingTimeInterval(86400)) == 5 && u.sevenDayNow(t0.addingTimeInterval(60 * 60 + 7 * 86400 + 1)) == 0,
+              "usage: weekly use counts as 0 after the next weekly reset")
+        check(u.weekReset(later) == t0.addingTimeInterval(60 * 60 + 7 * 86400), "usage: next weekly reset is a week after the last one")
+
+        // Auto-switch: the signed-in account at the threshold, the least used other account picked.
+        func acct(_ id: String, _ fh: Int, _ sd: Int) -> AutoSwitch.Candidate {
+            AutoSwitch.Candidate(accountId: id, usage: AccountUsage(accountId: id, org: "o-" + id, sampledAt: Date(), fiveHour: fh, sevenDay: sd,
+                                                                    fiveHourResetsBy: nil, weekAnchor: nil))
+        }
+        check(AutoSwitch.reason(acct("a", 10, 96).usage!, threshold: 95)?.contains("weekly") == true
+              && AutoSwitch.reason(acct("a", 96, 10).usage!, threshold: 95)?.contains("5-hour") == true
+              && AutoSwitch.reason(acct("a", 94, 94).usage!, threshold: 95) == nil, "auto-switch: triggers on either limit at the threshold")
+        let pick = AutoSwitch.pick([acct("b", 0, 60), acct("c", 99, 10), acct("d", 20, 30), AutoSwitch.Candidate(accountId: "e", usage: nil)], threshold: 95)
+        check(pick?.accountId == "d", "auto-switch: lowest weekly use under the threshold on both limits wins")
+        check(AutoSwitch.pick([acct("c", 99, 10), AutoSwitch.Candidate(accountId: "e", usage: nil)], threshold: 95)?.accountId == "e",
+              "auto-switch: an account with no usage data is tried last")
+        check(AutoSwitch.pick([acct("c", 99, 10)], threshold: 95) == nil, "auto-switch: no pick when every account is over")
+
+        // Mid-turn: an unanswered prompt or tool result, or a running tool call. Finished: end_turn, an error, an interrupt.
+        let tdir = base.appendingPathComponent("turns")
+        func turn(_ name: String, _ lines: [String]) throws -> Bool {
+            let url = tdir.appendingPathComponent(name + ".jsonl")
+            try write(lines.joined(separator: "\n") + "\n", url)
+            return ChatActivity.endsMidTurn(url)
+        }
+        let prompt = #"{"type":"user","message":{"role":"user","content":"do it"}}"#
+        let toolUse = #"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#
+        let toolResult = #"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#
+        let done = #"{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#
+        let limit = #"{"type":"assistant","error":"rate_limit","isApiErrorMessage":true,"message":{"stop_reason":"stop_sequence","content":[{"type":"text","text":"limit"}]}}"#
+        let interrupted = #"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#
+        let summary = #"{"type":"system","subtype":"stop_hook_summary"}"#
+        check(try turn("a", [prompt]) && turn("b", [prompt, toolUse]) && turn("c", [prompt, toolUse, toolResult]),
+              "activity: unanswered prompt, running tool and tool result are mid-turn")
+        check(try !turn("d", [prompt, toolUse, toolResult, done, summary]) && !turn("e", [prompt, limit]) && !turn("f", [prompt, toolUse, interrupted]),
+              "activity: finished, limited and interrupted turns are not")
+        check(ChatActivity.busyTranscripts(paths: HelperPaths(sessionsRoot: base, claudeConfig: base.appendingPathComponent("x.json"), projectsRoot: base,
+                                                               dataDir: base, claudeLog: base.appendingPathComponent("x.log")),
+                                           among: ["b", "d", "zzz"]) == ["b"], "activity: only the given chats that are mid-turn")
+
+        // Rotated logs are read too, and only new lines are parsed again.
+        let logDir = base.appendingPathComponent("logs")
+        let lp = HelperPaths(sessionsRoot: base, claudeConfig: base.appendingPathComponent("x.json"), projectsRoot: base,
+                             dataDir: base.appendingPathComponent("logdata"), claudeLog: logDir.appendingPathComponent("main.log"))
+        try write(logLine(t0, "Login-state transition (loggedOut: true \u{2192} false, uuid: <none> \u{2192} aaaaaaaa-0000-0000-0000-000000000001)"),
+                  logDir.appendingPathComponent("main1.log"))
+        try write(logLine(t0.addingTimeInterval(60), "Login-state transition (loggedOut: true \u{2192} false, uuid: <none> \u{2192} bbbbbbbb-0000-0000-0000-000000000002)"),
+                  lp.claudeLog)
+        try write("x", logDir.appendingPathComponent("other.log"))
+        check(ClaudeLog.allLoginEvents(paths: lp).count == 2, "log: rotated copies are read")
+        try appendLog(lp, logLine(t0.addingTimeInterval(120), "Login-state transition (loggedOut: false \u{2192} true, uuid: bbbbbbbb-0000-0000-0000-000000000002 \u{2192} <none>), clearing oauth cache"))
+        check(ClaudeLog.allLoginEvents(paths: lp).count == 3 && ClaudeLog.allLoginEvents(paths: lp).last?.isSignOut == true, "log: new lines picked up")
     }
 
     /// One-way copy from one account (two organizations) into two others.

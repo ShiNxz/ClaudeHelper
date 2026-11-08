@@ -24,7 +24,10 @@ public struct SwitchResult: Sendable {
     public var warnings: [String] = []
     public var loginBackup: URL?
     public var syncBackup: URL?
+    public var carryBackup: URL?
     public var reopened = false
+    /// True when Claude ended up on the target account.
+    public var switched = false
 }
 
 public enum LoginProfiles {
@@ -266,7 +269,8 @@ public enum LoginProfiles {
                 if fm.fileExists(atPath: src.path) { try fm.moveItem(at: src, to: backup.appendingPathComponent(name)) }
             }
             try writeConfig(try TopLevelJSON.remove(configData, keys: configKeys), paths: paths)
-            result.notes.append("Claude is signed out. Log in to the account there. The helper saves it by itself once you are in.")
+            AccountHistory.record(nil, paths: paths)
+            result.notes.append("Claude is signed out. Log in to the account there. Relay saves it by itself once you are in.")
         } catch {
             if quitByUs { try? await ClaudeApp.open(bundleID: bundleID) }
             throw error
@@ -278,6 +282,17 @@ public enum LoginProfiles {
         }
         step("Done")
         return result
+    }
+
+    static let swapSuffixes = ["switch-login", "switch-back", "add-account"]
+
+    /// When the helper swapped Claude's login files, from the names of its login backups.
+    public static func loginSwapDates(paths: HelperPaths) -> [Date] {
+        let names = (try? fm.contentsOfDirectory(atPath: paths.backupsDir.path)) ?? []
+        return names.compactMap { n in
+            guard n.count > 17, swapSuffixes.contains(where: { n.dropFirst(18).hasPrefix($0) }) else { return nil }
+            return BackupManager.stampFmt.date(from: String(n.prefix(17)))
+        }.sorted()
     }
 
     static func makeLoginBackupDir(paths: HelperPaths, suffix: String) throws -> URL {
@@ -339,6 +354,22 @@ public enum LoginProfiles {
         }
     }
 
+    /// Bring chats along to the account being switched to (for example the ones just worked on), while Claude
+    /// is closed. Problems skip it with a warning instead of failing the switch.
+    static func carryChats(_ intent: WriteIntent?, paths: HelperPaths, result: inout SwitchResult, step: (String) -> Void) throws {
+        guard let intent else { return }
+        let plan = Planner.plan(intent, paths: paths)
+        if !plan.problems.isEmpty {
+            result.warnings.append("Chats were not brought along: " + plan.problems.map { $0.path.lastPathComponent + ": " + $0.message }.joined(separator: "; "))
+        } else if !plan.changes.isEmpty {
+            step("Bringing chats along")
+            let r = try Executor.apply(plan, paths: paths)
+            result.carryBackup = r.backup.dir
+            let chats = Set(plan.changes.filter { $0.kind == .add || $0.kind == .update }.map(\.target.lastPathComponent)).count
+            result.notes.append("Brought \(chats) chat\(chats == 1 ? "" : "s") along.")
+        }
+    }
+
     /// Put a profile's login files in place, after backing up the current ones. Claude must not be running.
     static func restoreFiles(of profile: LoginProfile, paths: HelperPaths, backupSuffix: String) throws -> URL {
         let d = dir(profile, paths)
@@ -371,6 +402,8 @@ public enum LoginProfiles {
             throw HelperError.message("Could not put the cookie database in place. The previous files are in \(backup.path).")
         }
         try writeConfig(newConfig, paths: paths)
+        // Claude does not always log a sign-in when it opens on a swapped login, so note it here.
+        AccountHistory.record(profile.accountId, at: Date().addingTimeInterval(0.001), paths: paths)
         return backup
     }
 
@@ -407,7 +440,7 @@ public enum LoginProfiles {
     /// Quit Claude, re-save the current login, optionally sync chats, back up and swap the login files,
     /// reopen Claude and check it accepted the login. If Claude rejects it, the previous login is put back.
     /// `verifier` replaces the check against the live Claude (used by the self-test).
-    public static func switchTo(_ target: LoginProfile, syncFolderIds: [String]?, paths: HelperPaths,
+    public static func switchTo(_ target: LoginProfile, syncFolderIds: [String]?, carry: WriteIntent? = nil, paths: HelperPaths,
                                 bundleID: String = ClaudeApp.bundleID,
                                 verifier: ((LoginProfile) async -> Acceptance)? = nil,
                                 step: @escaping @Sendable (String) -> Void) async throws -> SwitchResult {
@@ -430,6 +463,7 @@ public enum LoginProfiles {
             outgoing = try saveOutgoing(paths: paths, result: &result, step: step)
 
             try mergeChats(syncFolderIds, paths: paths, result: &result, step: step)
+            try carryChats(carry, paths: paths, result: &result, step: step)
 
             step("Restoring the login for \(target.name)")
             result.loginBackup = try restoreFiles(of: target, paths: paths, backupSuffix: "switch-login")
@@ -455,6 +489,7 @@ public enum LoginProfiles {
         }
 
         if verdict == .accepted {
+            result.switched = true
             result.notes.append("Switched to \(target.name).")
             step("Done")
             return result

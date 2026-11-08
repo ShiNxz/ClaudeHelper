@@ -6,7 +6,7 @@ struct ClaudeHelperApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
-        Window("Claude Helper", id: "main") {
+        Window(AppInfo.name, id: "main") {
             MainView()
                 .environment(model)
                 .frame(minWidth: 900, minHeight: 560)
@@ -16,9 +16,31 @@ struct ClaudeHelperApp: App {
         MenuBarExtra {
             MenuContent().environment(model)
         } label: {
-            Image(nsImage: MenuBarIcon.image)
+            MenuBarLabel()
         }
     }
+}
+
+/// The menu bar icon. It lives as long as the app, so it also opens the window when a notification is clicked.
+struct MenuBarLabel: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(nsImage: MenuBarIcon.image)
+            .onReceive(NotificationCenter.default.publisher(for: .openHelperWindow)) { _ in
+                openWindow(id: "main")
+                NSApp.setActivationPolicy(.regular)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+    }
+}
+
+/// "5h 42% · wk 81%" for menus, or nil without data.
+func usageSummary(_ u: AccountUsage?) -> String? {
+    guard let u else { return nil }
+    var parts = ["5h \(u.fiveHourNow())%"]
+    if let w = u.sevenDayNow() { parts.append("wk \(w)%") }
+    return parts.joined(separator: " \u{00B7} ")
 }
 
 struct MenuContent: View {
@@ -26,7 +48,7 @@ struct MenuContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button("Open Claude Helper") { show(.sessions) }
+        Button("Open \(AppInfo.name)") { show(.sessions) }
         Button("Search Chats") { show(.search) }
         Button("Sync Chats") { show(.sync) }
         Divider()
@@ -35,13 +57,17 @@ struct MenuContent: View {
         } else if !model.accountEntries.isEmpty {
             Text("Claude account")
             ForEach(model.accountEntries) { e in
+                let usage = usageSummary(e.usage).map { "   " + $0 } ?? ""
                 if e.isActive {
-                    Button("\u{2713} " + e.title) {}.disabled(true)
+                    Button("\u{2713} " + e.title + usage) {}.disabled(true)
                 } else if let p = e.profile, !p.needsLogin {
-                    Button("     " + e.title) { model.activate(e) }
+                    Button("     " + e.title + usage) { model.activate(e) }
                 } else {
                     Button("     " + e.title + (e.profile == nil ? " (log in to save)" : " (log in again)")) { model.activate(e) }
                 }
+            }
+            if model.autoSwitchEnabled {
+                Text(model.autoSwitchStatus ?? "Auto-switch on at \(model.autoSwitchThreshold)%")
             }
             Button("Manage Accounts...") { show(.accounts) }
         }
@@ -53,7 +79,7 @@ struct MenuContent: View {
             Button("Update Search Index") { model.startIndexing() }
         }
         Divider()
-        Button("Quit Claude Helper") { NSApp.terminate(nil) }
+        Button("Quit \(AppInfo.name)") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
 
@@ -78,16 +104,6 @@ struct MainView: View {
             .safeAreaInset(edge: .bottom) { SidebarFooter() }
         } detail: {
             VStack(spacing: 0) {
-                if let banner = model.banner {
-                    HStack {
-                        Image(systemName: "info.circle")
-                        Text(banner).lineLimit(2)
-                        Spacer()
-                        Button { model.banner = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless)
-                    }
-                    .padding(10)
-                    .background(Color.yellow.opacity(0.15))
-                }
                 switch model.section {
                 case .sessions: SessionsView()
                 case .search: SearchView()
@@ -96,6 +112,14 @@ struct MainView: View {
                 case .backups: BackupsView()
                 }
             }
+            .overlay(alignment: .bottom) {
+                if let t = model.toast {
+                    ToastView(toast: t) { model.toast = nil }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .onTapGesture { model.toast = nil }
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: model.toast)
         }
         .sheet(item: $model.planSheet) { _ in PlanSheetView() }
         .onAppear {

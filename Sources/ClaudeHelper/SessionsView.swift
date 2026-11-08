@@ -2,89 +2,122 @@ import AppKit
 import HelperCore
 import SwiftUI
 
+/// One chat, with its copies in every account folder being shown.
 struct SessionRow: Identifiable {
+    /// The copy shown: the signed-in account's when it has one, otherwise the newest.
     let record: SessionRecord
+    /// Every copy in the folders being shown. Changes from the table go to all of them.
+    let copies: [SessionRecord]
+    /// One line per copy, for the Accounts tooltip.
+    let copyLabels: [String]
+    let accountCount: Int
     let edit: SessionEdit?
-    let accountLabel: String
-    let copies: Int
+    let hasPending: Bool
+    /// The signed-in account has this chat, so Claude can open it.
+    let inSignedIn: Bool
+    /// The signed-in account lacks it and can take it in.
+    let pullable: Bool
 
-    var id: String { record.id }
+    var id: String { record.sessionId }
     var title: String { edit?.title ?? record.title }
     var isArchived: Bool { edit?.isArchived ?? record.isArchived }
     var isStarred: Bool { edit?.isStarred ?? record.isStarred }
-    var hasPending: Bool { edit != nil }
     var project: String {
         let comps = record.cwd.split(separator: "/")
         return comps.suffix(2).joined(separator: "/")
     }
-    var lastActivity: Date { record.lastActivityAt ?? record.fileMTime }
+    var lastActivity: Date { copies.map { $0.lastActivityAt ?? $0.fileMTime }.max() ?? record.fileMTime }
+    var accountsText: String { accountCount == 1 ? (copyLabels.first ?? "") : "\(accountCount) accounts" }
     var archivedSort: Int { isArchived ? 1 : 0 }
+    var hereSort: Int { inSignedIn ? 0 : pullable ? 1 : 2 }
     var pinnedSort: Int { isStarred ? 1 : 0 }
 }
 
 enum StatusFilter: String, CaseIterable, Identifiable {
-    case all = "All", active = "Active", archived = "Archived", pinned = "Pinned", pending = "Changed"
+    case all = "All", active = "Active", archived = "Archived", pinned = "Pinned", elsewhere = "Not in this account", pending = "Changed"
     var id: String { rawValue }
 }
 
 struct SessionsView: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
-    @State private var status: StatusFilter = .all
+    @State private var status: StatusFilter = SelfCheck.sessionsFilter ?? .all
     @State private var folderFilter = "all-live"
     @State private var selection = Set<String>()
     @State private var sortOrder = [KeyPathComparator(\SessionRow.lastActivity, order: .reverse)]
-    @State private var renaming: [SessionRecord] = []
+    @State private var renaming: [SessionRow] = []
     @State private var showInspector = false
 
     var rows: [SessionRow] {
         guard let snap = model.snapshot else { return [] }
-        var counts: [String: Int] = [:]
-        for s in snap.allSessions where !s.folder.isBackupCopy { counts[s.sessionId, default: 0] += 1 }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        var out: [SessionRow] = []
+        let have = model.signedInChatIds
+        let active = snap.activeAccountId
+        // Copies of each chat in the folders the Folder menu shows.
+        var byChat: [String: [SessionRecord]] = [:]
+        var order: [String] = []
         for f in snap.folders {
             switch folderFilter {
             case "all": break
             case "all-live": if f.folder.isBackupCopy { continue }
             default: if f.folder.id != folderFilter { continue }
             }
-            let label = model.label(f.folder)
             for s in f.sessions {
-                let row = SessionRow(record: s, edit: model.pending[s.id], accountLabel: label, copies: counts[s.sessionId] ?? 1)
-                switch status {
-                case .all: break
-                case .active: if row.isArchived { continue }
-                case .archived: if !row.isArchived { continue }
-                case .pinned: if !row.isStarred { continue }
-                case .pending: if !row.hasPending { continue }
-                }
-                if !q.isEmpty {
-                    let hay = (row.title + " " + s.cwd + " " + s.sessionId + " " + (s.cliSessionId ?? "")).lowercased()
-                    if !hay.contains(q) { continue }
-                }
-                out.append(row)
+                if byChat[s.sessionId] == nil { order.append(s.sessionId) }
+                byChat[s.sessionId, default: []].append(s)
             }
+        }
+        var out: [SessionRow] = []
+        for sid in order {
+            let copies = byChat[sid]!
+            let primary = copies.first { $0.folder.accountId == active && !$0.folder.isBackupCopy }
+                ?? copies.max { ($0.lastActivityAt ?? $0.fileMTime) < ($1.lastActivityAt ?? $1.fileMTime) }!
+            let row = SessionRow(record: primary, copies: copies,
+                                 copyLabels: copies.map { model.label($0.folder) }.sorted(),
+                                 accountCount: Set(copies.map { $0.folder.isBackupCopy ? $0.folder.id : $0.folder.accountId }).count,
+                                 edit: model.pending[primary.id], hasPending: copies.contains { model.pending[$0.id] != nil },
+                                 inSignedIn: have.contains(sid), pullable: copies.contains { model.canPull($0, have: have) })
+            switch status {
+            case .all: break
+            case .active: if row.isArchived { continue }
+            case .archived: if !row.isArchived { continue }
+            case .pinned: if !row.isStarred { continue }
+            case .elsewhere: if !row.pullable { continue }
+            case .pending: if !row.hasPending { continue }
+            }
+            if !q.isEmpty {
+                let hay = (row.title + " " + primary.cwd + " " + sid + " " + (primary.cliSessionId ?? "") + " " + row.copyLabels.joined(separator: " ")).lowercased()
+                if !hay.contains(q) { continue }
+            }
+            out.append(row)
         }
         return out.sorted(using: sortOrder)
     }
 
-    var selectedRecords: [SessionRecord] {
-        guard let snap = model.snapshot else { return [] }
-        return snap.allSessions.filter { selection.contains($0.id) }
+    func rows(_ ids: Set<String>) -> [SessionRow] { rows.filter { ids.contains($0.id) } }
+
+    /// Copies that changes go to: the live ones, or the backup copies for a chat that only exists there.
+    static func editTargets(_ rows: [SessionRow]) -> [SessionRecord] {
+        rows.flatMap { r in
+            let live = r.copies.filter { !$0.folder.isBackupCopy }
+            return live.isEmpty ? r.copies : live
+        }
     }
 
     var body: some View {
         let rows = self.rows
+        let selected = rows.filter { selection.contains($0.id) }
+        let targets = Self.editTargets(selected)
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Picker("Show", selection: $status) {
                     ForEach(StatusFilter.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 380)
+                .frame(width: 540)
+                .help("Not in this account: chats the signed-in account does not have, so Claude cannot open them yet.")
                 Picker("Folder", selection: $folderFilter) {
-                    Text("All account folders").tag("all-live")
+                    Text("All accounts").tag("all-live")
                     Text("All, including backup copies").tag("all")
                     Divider()
                     ForEach(model.snapshot?.folders ?? []) { f in
@@ -92,8 +125,9 @@ struct SessionsView: View {
                     }
                 }
                 .frame(maxWidth: 330)
+                .help("Pick one account folder to see and change only its copies")
                 Spacer()
-                Text("\(rows.count) shown").foregroundStyle(.secondary).font(.callout)
+                Text("\(rows.count) chat" + (rows.count == 1 ? "" : "s")).foregroundStyle(.secondary).font(.callout)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -103,26 +137,38 @@ struct SessionsView: View {
                     HStack(spacing: 6) {
                         if row.hasPending { Circle().fill(Color.accentColor).frame(width: 6, height: 6).help("Changed, not applied yet") }
                         Text(row.title).italic(row.hasPending).lineLimit(1)
-                        if !row.record.problems.isEmpty {
+                        let problems = row.copies.flatMap(\.problems)
+                        if !problems.isEmpty {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                                .help(row.record.problems.joined(separator: "\n"))
+                                .help(Array(Set(problems)).sorted().joined(separator: "\n"))
                         }
                     }
                 }
-                .width(min: 200, ideal: 300)
+                .width(min: 200, ideal: 320)
                 TableColumn("Project", value: \.project) { row in
                     Text(row.project).foregroundStyle(.secondary).lineLimit(1).help(row.record.cwd)
                 }
                 .width(min: 90, ideal: 150)
-                TableColumn("Account folder", value: \.accountLabel) { row in
-                    Text(row.accountLabel).foregroundStyle(.secondary).lineLimit(1)
+                TableColumn("Signed-in account", value: \.hereSort) { row in
+                    if row.inSignedIn {
+                        HStack(spacing: 5) {
+                            Circle().fill(Color.green).frame(width: 8, height: 8)
+                            Text("Here").foregroundStyle(.secondary)
+                        }
+                        .help("The signed-in account has this chat, so Claude can open it")
+                    } else if row.pullable {
+                        Button("Add to This Account") { model.previewPull(row.copies) }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("Copy this chat into the signed-in account so Claude can open it")
+                    }
                 }
-                .width(min: 90, ideal: 150)
-                TableColumn("Copies", value: \.copies) { row in
-                    Text(row.copies > 1 ? "\(row.copies)" : "").foregroundStyle(.secondary)
-                        .help("Number of account folders with this chat")
+                .width(min: 120, ideal: 140)
+                TableColumn("Accounts", value: \.accountsText) { row in
+                    Text(row.accountsText).foregroundStyle(.secondary).lineLimit(1)
+                        .help(row.copyLabels.joined(separator: "\n"))
                 }
-                .width(50)
+                .width(min: 90, ideal: 160)
                 TableColumn("Archived", value: \.archivedSort) { row in
                     if row.isArchived { Image(systemName: "archivebox").foregroundStyle(.secondary) }
                 }
@@ -138,31 +184,33 @@ struct SessionsView: View {
                 .width(min: 140, ideal: 160)
             }
             .contextMenu(forSelectionType: String.self) { ids in
-                contextMenu(for: ids)
+                contextMenu(for: self.rows(ids))
             } primaryAction: { ids in
-                if let id = ids.first, let r = model.record(for: id) { model.open(r) }
+                if let id = ids.first, let row = self.rows.first(where: { $0.id == id }) { model.open(row.record) }
             }
 
             if !model.pending.isEmpty { PendingBar() }
         }
-        .searchable(text: $query, placement: .toolbar, prompt: "Filter by title, folder or id")
+        .searchable(text: $query, placement: .toolbar, prompt: "Filter by title, project, account or id")
         .toolbar {
             ToolbarItemGroup {
-                Button { model.queue(selectedRecords, archived: false) } label: { Label("Restore", systemImage: "arrow.uturn.backward") }
+                Button { model.previewPull(selected.flatMap(\.copies)) } label: { Label("Add to This Account", systemImage: "square.and.arrow.down") }
+                    .help("Copy the selected chats into the signed-in account so Claude can open them")
+                    .disabled(!selected.contains { $0.pullable })
+                Button { model.queue(targets, archived: false) } label: { Label("Restore", systemImage: "arrow.uturn.backward") }
                     .help("Restore the selected archived chats")
-                    .disabled(!selectedRecords.contains { (model.pending[$0.id]?.isArchived ?? $0.isArchived) })
-                Button { model.queue(selectedRecords, archived: true) } label: { Label("Archive", systemImage: "archivebox") }
-                    .help("Archive the selected chats")
-                    .disabled(selectedRecords.isEmpty)
+                    .disabled(!selected.contains { $0.isArchived })
+                Button { model.queue(targets, archived: true) } label: { Label("Archive", systemImage: "archivebox") }
+                    .help("Archive the selected chats in every account that has them")
+                    .disabled(selected.isEmpty)
                 Button {
-                    let anyUnpinned = selectedRecords.contains { !(model.pending[$0.id]?.isStarred ?? $0.isStarred) }
-                    model.queue(selectedRecords, starred: anyUnpinned)
+                    model.queue(targets, starred: selected.contains { !$0.isStarred })
                 } label: { Label("Pin", systemImage: "pin") }
                     .help("Pin or unpin the selected chats")
-                    .disabled(selectedRecords.isEmpty)
-                Button { renaming = selectedRecords } label: { Label("Rename", systemImage: "pencil") }
+                    .disabled(selected.isEmpty)
+                Button { renaming = selected } label: { Label("Rename", systemImage: "pencil") }
                     .help("Rename the selected chats")
-                    .disabled(selectedRecords.isEmpty)
+                    .disabled(selected.isEmpty)
                 Button { model.refresh() } label: { Label("Reload", systemImage: "arrow.clockwise") }
                     .help("Read the session files again")
                 Button { showInspector.toggle() } label: { Label("Details", systemImage: "sidebar.right") }
@@ -170,33 +218,38 @@ struct SessionsView: View {
             }
         }
         .inspector(isPresented: $showInspector) {
-            SessionInspector(record: selectedRecords.count == 1 ? selectedRecords.first : nil)
+            SessionInspector(row: selected.count == 1 ? selected.first : nil)
                 .inspectorColumnWidth(min: 260, ideal: 300)
         }
         .sheet(isPresented: Binding(get: { !renaming.isEmpty }, set: { if !$0 { renaming = [] } })) {
-            RenameSheet(records: renaming) { renaming = [] }
+            RenameSheet(rows: renaming) { renaming = [] }
         }
     }
 
     @ViewBuilder
-    func contextMenu(for ids: Set<String>) -> some View {
-        let recs = model.snapshot?.allSessions.filter { ids.contains($0.id) } ?? []
-        if let r = recs.first, recs.count == 1 {
-            Button("Open in Claude") { model.open(r) }
+    func contextMenu(for rows: [SessionRow]) -> some View {
+        let targets = Self.editTargets(rows)
+        if let row = rows.first, rows.count == 1 {
+            let r = row.record
+            Button(row.inSignedIn ? "Open in Claude" : "Add to This Account and Open...") { model.open(r) }
             if let cmd = r.resumeCommand { Button("Copy Resume Command") { model.copy(cmd) } }
             Button("Copy Session ID") { model.copy(r.sessionId) }
             Button("Show File in Finder") { model.reveal(r.fileURL) }
             Divider()
         }
-        if !recs.isEmpty {
-            Button("Restore from Archive") { model.queue(recs, archived: false) }
-            Button("Archive") { model.queue(recs, archived: true) }
-            Button("Pin") { model.queue(recs, starred: true) }
-            Button("Unpin") { model.queue(recs, starred: false) }
-            Button("Rename...") { renaming = recs }
-            if recs.contains(where: { model.pending[$0.id] != nil }) {
+        if rows.contains(where: \.pullable) {
+            Button("Add to This Account...") { model.previewPull(rows.flatMap(\.copies)) }
+            Divider()
+        }
+        if !rows.isEmpty {
+            Button("Restore from Archive") { model.queue(targets, archived: false) }
+            Button("Archive") { model.queue(targets, archived: true) }
+            Button("Pin") { model.queue(targets, starred: true) }
+            Button("Unpin") { model.queue(targets, starred: false) }
+            Button("Rename...") { renaming = rows }
+            if rows.contains(where: \.hasPending) {
                 Divider()
-                Button("Undo Pending Change") { for r in recs { model.pending[r.id] = nil } }
+                Button("Undo Pending Change") { for r in rows.flatMap(\.copies) { model.pending[r.id] = nil } }
             }
         }
     }
@@ -208,7 +261,8 @@ struct PendingBar: View {
     var body: some View {
         HStack {
             Image(systemName: "square.and.pencil")
-            Text("\(model.pending.count) chat\(model.pending.count == 1 ? "" : "s") changed, not written yet.")
+            let n = Set(model.pending.values.map(\.sessionId)).count
+            Text("\(n) chat\(n == 1 ? "" : "s") changed, not written yet.")
             Spacer()
             Button("Discard") { model.discardPending() }
             Button("Review and Apply...") { model.previewPending() }
@@ -221,19 +275,29 @@ struct PendingBar: View {
 
 struct SessionInspector: View {
     @Environment(AppModel.self) private var model
-    let record: SessionRecord?
+    let row: SessionRow?
 
     var body: some View {
-        if let r = record {
+        if let row, case let r = row.record {
             Form {
                 Section {
                     Text(r.title).font(.headline).textSelection(.enabled)
                     HStack {
-                        Button("Open in Claude") { model.open(r) }
+                        Button(row.inSignedIn ? "Open in Claude" : "Add and Open") { model.open(r) }
                         if let cmd = r.resumeCommand { Button("Copy Resume") { model.copy(cmd) } }
                     }
                 }
-                Section("Where") {
+                Section(row.copies.count == 1 ? "Account" : "In \(row.accountCount) accounts") {
+                    ForEach(row.copies, id: \.id) { c in
+                        HStack {
+                            Text(model.label(c.folder))
+                            Spacer()
+                            if c.isArchived { Image(systemName: "archivebox").foregroundStyle(.secondary).help("Archived in this account") }
+                            if c.isStarred { Image(systemName: "pin.fill").foregroundStyle(.orange).help("Pinned in this account") }
+                        }
+                    }
+                }
+                Section("Shown copy") {
                     LabeledContent("Account folder", value: model.label(r.folder))
                     LabeledContent("Project", value: r.cwd)
                     LabeledContent("File") { Button(r.fileURL.lastPathComponent) { model.reveal(r.fileURL) }.buttonStyle(.link) }
@@ -273,8 +337,9 @@ struct SessionInspector: View {
 
 struct RenameSheet: View {
     @Environment(AppModel.self) private var model
-    let records: [SessionRecord]
+    let rows: [SessionRow]
     let done: () -> Void
+    var records: [SessionRecord] { rows.map(\.record) }
     @State private var single = ""
     @State private var find = ""
     @State private var replace = ""
@@ -315,10 +380,13 @@ struct RenameSheet: View {
                 Spacer()
                 Button("Cancel", action: done).keyboardShortcut(.cancelAction)
                 Button("Rename") {
-                    model.queue(records, title: { r in
+                    // Every account's copy of a chat gets the title worked out from the shown copy.
+                    var titles: [String: String] = [:]
+                    for r in records {
                         let t = newTitle(r).trimmingCharacters(in: .whitespacesAndNewlines)
-                        return t.isEmpty ? nil : t
-                    })
+                        if !t.isEmpty { titles[r.sessionId] = t }
+                    }
+                    model.queue(SessionsView.editTargets(rows), title: { titles[$0.sessionId] })
                     done()
                 }
                 .keyboardShortcut(.defaultAction)

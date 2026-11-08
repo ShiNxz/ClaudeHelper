@@ -100,7 +100,8 @@ struct BackupsView: View {
                     .font(.callout).foregroundStyle(.secondary)
                 Spacer()
                 Button("Back Up Now") {
-                    model.banner = model.backupNow()
+                    let r = model.backupNow()
+                    model.notify(r.text, title: r.ok ? "Backed up" : "Backup failed", warning: !r.ok)
                     backups = model.backups()
                 }
                 .help("Save a copy of every account folder's session files without changing anything")
@@ -188,6 +189,7 @@ struct PlanSheetView: View {
                     Label("Done. Wrote \(result.written) file(s), moved \(result.moved) to the backup.", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green).font(.headline)
                     Text(reopened ? "Claude was reopened." : (model.claudeRunning ? "" : "Claude was not running, so it was not started."))
+                    if let r = sheet.openAfter { Text("Opening \(quoted(r.title)) in Claude.") }
                     HStack {
                         Text("Backup: " + result.backup.dir.path).font(.caption).textSelection(.enabled)
                         Button("Show") { model.reveal(result.backup.dir) }
@@ -319,9 +321,13 @@ struct PlanSheetView: View {
                 if !model.claudeRunning, model.paths.isLiveSessionsRoot {
                     Button("Reopen Claude") { model.reopenClaude() }
                 }
+                if let r = sheet.openAfter {
+                    Button("Open Without Adding") { model.planSheet = nil; model.openInClaude(r) }
+                        .help("Claude most likely shows an empty or missing chat")
+                }
                 Spacer()
                 Button("Cancel") { model.planSheet = nil }.keyboardShortcut(.cancelAction)
-                Button(model.claudeRunning ? "Quit Claude, Back Up and Apply" : "Back Up and Apply") { model.applyPlan() }
+                Button((model.claudeRunning ? "Quit Claude, Back Up and " : "Back Up and ") + (sheet.openAfter == nil ? "Apply" : "Add")) { model.applyPlan() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!sheet.plan.canApply)
             case .applying:

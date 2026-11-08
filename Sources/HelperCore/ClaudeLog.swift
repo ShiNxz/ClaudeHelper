@@ -13,6 +13,11 @@ public struct LoginEvent: Sendable, Equatable {
     public let date: Date
     public let kind: Kind
 
+    public init(date: Date, kind: Kind) {
+        self.date = date
+        self.kind = kind
+    }
+
     public var isSignOut: Bool { if case .signedOut = kind { return true } else { return false } }
 }
 
@@ -36,6 +41,10 @@ public enum ClaudeLog {
         let start = size > UInt64(tailBytes) ? size - UInt64(tailBytes) : 0
         try? fh.seek(toOffset: start)
         guard let data = try? fh.readToEnd() else { return [] }
+        return parse(data, since: since)
+    }
+
+    static func parse(_ data: Data, since: Date? = nil) -> [LoginEvent] {
         let text = String(decoding: data, as: UTF8.self)
         var out: [LoginEvent] = []
         for line in text.split(separator: "\n") where line.contains("[account]") {
@@ -62,6 +71,69 @@ public enum ClaudeLog {
 
     /// True when the newest sign-in/sign-out event says Claude is signed out. Nil when the log has no such event.
     public static func lastStateIsSignedOut(paths: HelperPaths) -> Bool? {
-        loginEvents(paths: paths).last.map(\.isSignOut)
+        // The cached full history, so checking every minute does not re-read megabytes of log.
+        allLoginEvents(paths: paths).last.map(\.isSignOut)
+    }
+
+    // MARK: Full history
+
+    struct CachedFile {
+        var inode: UInt64
+        var size: UInt64
+        var mtime: Date
+        /// Bytes parsed so far, always at a line end.
+        var offset: UInt64
+        var events: [LoginEvent]
+    }
+    nonisolated(unsafe) static var cache: [String: CachedFile] = [:]
+    static let cacheLock = NSLock()
+
+    /// Claude's log and its rotated copies (main.log, main1.log, main2.log, ...).
+    static func logFiles(_ paths: HelperPaths) -> [URL] {
+        let dir = paths.claudeLog.deletingLastPathComponent()
+        let stem = paths.claudeLog.deletingPathExtension().lastPathComponent
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        return names.filter { n in
+            guard n.hasPrefix(stem), n.hasSuffix(".log") else { return false }
+            let mid = n.dropFirst(stem.count).dropLast(4)
+            return mid.allSatisfy(\.isNumber)
+        }.map { dir.appendingPathComponent($0) }
+    }
+
+    /// Every sign-in and sign-out event in the log and its rotated copies, oldest first. Files are parsed once
+    /// and then only their new lines, so this is cheap to call every minute.
+    public static func allLoginEvents(paths: HelperPaths) -> [LoginEvent] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        var all: [LoginEvent] = []
+        for url in logFiles(paths) {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let size = (attrs[.size] as? NSNumber)?.uint64Value,
+                  let inode = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value else { continue }
+            let mtime = attrs[.modificationDate] as? Date ?? .distantPast
+            var entry = cache[url.path]
+            if let e = entry, e.inode == inode, e.size == size, e.mtime == mtime {
+                all += e.events
+                continue
+            }
+            if entry == nil || entry!.inode != inode || size < entry!.offset {
+                entry = CachedFile(inode: inode, size: 0, mtime: .distantPast, offset: 0, events: [])
+            }
+            guard var e = entry, let fh = try? FileHandle(forReadingFrom: url) else { continue }
+            try? fh.seek(toOffset: e.offset)
+            let data = (try? fh.readToEnd()) ?? Data()
+            try? fh.close()
+            // Only whole lines; a line still being written is read next time.
+            if let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) {
+                let whole = data[data.startIndex...lastNewline]
+                e.events += parse(Data(whole))
+                e.offset += UInt64(whole.count)
+            }
+            e.size = size
+            e.mtime = mtime
+            cache[url.path] = e
+            all += e.events
+        }
+        return all.sorted { $0.date < $1.date }
     }
 }
