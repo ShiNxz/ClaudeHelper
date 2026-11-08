@@ -11,16 +11,16 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ShiNxz/ClaudeHelper/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ShiNxz/ClaudeHelper?label=release&color=c2643c"></a>
+  <a href="https://github.com/ShiNxz/Relay/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ShiNxz/Relay?label=release&color=c2643c"></a>
   <img alt="macOS 14 or newer" src="https://img.shields.io/badge/macOS-14%2B-111111">
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-3c9a5f"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/ShiNxz/ClaudeHelper/releases/latest"><b>Download for macOS</b></a>
+  <a href="https://github.com/ShiNxz/Relay/releases/latest"><b>Download for macOS</b></a>
   &nbsp;&middot;&nbsp;
-  <a href="https://github.com/ShiNxz/ClaudeHelper/releases/latest"><b>Download for Windows</b></a>
+  <a href="https://github.com/ShiNxz/Relay/releases/latest"><b>Download for Windows</b></a>
 </p>
 
 <p align="center">
@@ -48,7 +48,7 @@ Relay sits next to Claude in the menu bar (macOS) or the tray (Windows) and fixe
 
 ## Get started
 
-1. **Install.** Download from [Releases](https://github.com/ShiNxz/ClaudeHelper/releases/latest).
+1. **Install.** Download from [Releases](https://github.com/ShiNxz/Relay/releases/latest).
    - **macOS** (14 Sonoma or newer): open `Relay-<version>.dmg` and drag Relay to Applications. The build is not notarized yet, so the first time macOS refuses to open it: click **Done**, then **System Settings > Privacy & Security > Open Anyway**. Or run `xattr -dr com.apple.quarantine /Applications/Relay.app`.
    - **Windows** (10 or 11): run `Relay-<version>-windows-x64-setup.exe`. It installs for your user only. The installer is not code signed, so SmartScreen may warn: click **More info > Run anyway**.
 2. **Save your accounts.** Open **Accounts**. Click **Save** on the account Claude is signed in to, then **Log In and Save** on each other account and log in to it in Claude. Relay saves it by itself within a minute.
@@ -165,7 +165,7 @@ Edits change only the listed top-level keys; the rest of the file stays byte for
 
 ## Windows testers wanted
 
-The Windows app is new. Its core is the same logic as the macOS app, ported to Rust and tested in CI on Windows, but **it has not been tried with real accounts on a Windows PC yet**. If you use Claude on Windows, please try it and [open an issue](https://github.com/ShiNxz/ClaudeHelper/issues) with what worked and what didn't. The most useful things to check:
+The Windows app is new. Its core is the same logic as the macOS app, ported to Rust and tested in CI on Windows, but **it has not been tried with real accounts on a Windows PC yet**. If you use Claude on Windows, please try it and [open an issue](https://github.com/ShiNxz/Relay/issues) with what worked and what didn't. The most useful things to check:
 
 1. Does Relay find your accounts, chats and usage? (Claude's folder should be `%APPDATA%\Claude`.)
 2. Does **Save** work while Claude is running, or does it ask to close Claude?
@@ -179,8 +179,8 @@ Pull requests are welcome. The Windows app is in [`windows/`](windows): `core/` 
 **macOS** (Swift, needs the Xcode Command Line Tools):
 
 ```bash
-git clone https://github.com/ShiNxz/ClaudeHelper.git
-cd ClaudeHelper
+git clone https://github.com/ShiNxz/Relay.git
+cd Relay
 ./bundle.sh                       # build/Relay.app for this Mac
 ./bundle.sh --universal --dmg     # arm64 + x86_64 app and a DMG
 ./bundle.sh --install             # copy to /Applications (replaces an older Claude Helper.app)
